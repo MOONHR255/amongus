@@ -27,6 +27,8 @@ export default function AdminDashboard() {
   const [teams, setTeams] = useState([]);
   const [questions, setQuestions] = useState({});
   const [notifications, setNotifications] = useState([]);
+  const [eliminatedList, setEliminatedList] = useState([]); // 퇴출자 명단
+  const [activeNotifications, setActiveNotifications] = useState([]); // 현재 표시 중인 알림
   
   // 폼 상태
   const [newActivityName, setNewActivityName] = useState('');
@@ -277,7 +279,13 @@ export default function AdminDashboard() {
         }
       );
       
+      // 활동이 변경되면 활성 알림 초기화 및 해당 활동의 퇴출자만 필터링
+      setActiveNotifications([]);
+      
       return () => unsubscribe();
+    } else {
+      // 활동이 선택되지 않으면 알림 초기화
+      setActiveNotifications([]);
     }
   }, [selectedActivity]);
 
@@ -296,6 +304,101 @@ export default function AdminDashboard() {
     
     return () => unsubscribe();
   }, []);
+
+  // 새로운 알림 처리 및 30초 타이머
+  useEffect(() => {
+    const timers = [];
+    
+    // 활동이 선택되지 않았으면 알림 처리하지 않음
+    if (!selectedActivity) {
+      setActiveNotifications([]);
+      return;
+    }
+    
+    notifications.forEach((notif) => {
+      // 퇴출 알림이고, 현재 선택된 활동과 일치하는지 확인
+      if (notif.text && notif.text.includes('퇴출') && notif.activityId === selectedActivity) {
+        // 알림의 timestamp 확인
+        let notifTime = null;
+        if (notif.timestamp?.toDate) {
+          notifTime = notif.timestamp.toDate().getTime();
+        } else if (notif.timestamp?.seconds) {
+          notifTime = notif.timestamp.seconds * 1000;
+        } else if (notif.timestamp instanceof Date) {
+          notifTime = notif.timestamp.getTime();
+        }
+        
+        const now = Date.now();
+        const timeDiff = notifTime ? now - notifTime : 0; // 밀리초 단위
+        
+        // 이미 활성 알림에 있는지 확인
+        setActiveNotifications(prev => {
+          const isAlreadyActive = prev.some(n => n.id === notif.id);
+          if (!isAlreadyActive) {
+            // 30초(30000ms)가 지난 알림은 바로 퇴출자 명단에 추가
+            if (timeDiff >= 30000) {
+              // 퇴출자 명단에 바로 추가 (현재 활동의 알림만)
+              if (notif.activityId === selectedActivity) {
+                setEliminatedList(current => {
+                  const studentName = notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  const isDuplicate = current.some(item => {
+                    const itemTime = item.timestamp?.seconds || (item.timestamp?.toDate ? item.timestamp.toDate().getTime() : 0);
+                    const notifTimeValue = notif.timestamp?.seconds || (notif.timestamp?.toDate ? notif.timestamp.toDate().getTime() : 0);
+                    return item.name === studentName && itemTime === notifTimeValue;
+                  });
+                  if (!isDuplicate) {
+                    return [...current, {
+                      name: studentName,
+                      timestamp: notif.timestamp,
+                      id: notif.id,
+                      activityId: notif.activityId
+                    }];
+                  }
+                  return current;
+                });
+              }
+              return prev; // 활성 알림에는 추가하지 않음
+            }
+            
+            // 30초가 지나지 않은 경우, 남은 시간만큼 타이머 설정
+            const remainingTime = 30000 - timeDiff;
+            const timer = setTimeout(() => {
+              setActiveNotifications(current => current.filter(n => n.id !== notif.id));
+              
+              // 퇴출자 명단에 추가 (중복 방지, 현재 활동의 알림만)
+              if (notif.activityId === selectedActivity) {
+                setEliminatedList(current => {
+                  const studentName = notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  const isDuplicate = current.some(item => {
+                    const itemTime = item.timestamp?.seconds || (item.timestamp?.toDate ? item.timestamp.toDate().getTime() : 0);
+                    const notifTimeValue = notif.timestamp?.seconds || (notif.timestamp?.toDate ? notif.timestamp.toDate().getTime() : 0);
+                    return item.name === studentName && itemTime === notifTimeValue;
+                  });
+                  if (!isDuplicate) {
+                    return [...current, {
+                      name: studentName,
+                      timestamp: notif.timestamp,
+                      id: notif.id,
+                      activityId: notif.activityId
+                    }];
+                  }
+                  return current;
+                });
+              }
+            }, remainingTime);
+            
+            timers.push(timer);
+            return [...prev, notif];
+          }
+          return prev;
+        });
+      }
+    });
+    
+    return () => {
+      timers.forEach(timer => clearTimeout(timer));
+    };
+  }, [notifications, selectedActivity]);
 
   // 활동 목록 로드
   useEffect(() => {
@@ -332,10 +435,10 @@ export default function AdminDashboard() {
 
   return (
     <div className="min-h-screen bg-gray-100 p-6">
-      {/* 알림 표시 */}
-      {notifications.length > 0 && (
+      {/* 알림 표시 (30초 동안만 표시, 선택된 활동의 알림만) */}
+      {selectedActivity && activeNotifications.length > 0 && (
         <div className="fixed top-4 right-4 z-50 space-y-2">
-          {notifications.slice(0, 3).map((notif) => (
+          {activeNotifications.slice(0, 3).map((notif) => (
             <div
               key={notif.id}
               className="bg-red-600 text-white px-6 py-4 rounded-lg shadow-lg flex items-center gap-3 animate-pulse"
@@ -344,6 +447,50 @@ export default function AdminDashboard() {
               <span className="font-semibold">{notif.text}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* 퇴출자 명단 (선택된 활동의 퇴출자만) */}
+      {selectedActivity && eliminatedList.filter(item => item.activityId === selectedActivity).length > 0 && (
+        <div className="fixed bottom-4 right-4 z-40 bg-white rounded-lg shadow-xl p-6 max-w-sm max-h-96 overflow-y-auto">
+          <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <AlertCircle className="w-5 h-5 text-red-600" />
+            퇴출자 명단
+          </h3>
+          <div className="space-y-2">
+            {eliminatedList
+              .filter(item => item.activityId === selectedActivity)
+              .sort((a, b) => {
+                const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : 0;
+                const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : 0;
+                return timeB - timeA;
+              })
+              .map((item, index) => (
+                <div
+                  key={item.id || index}
+                  className="p-3 bg-red-50 border-l-4 border-red-600 rounded"
+                >
+                  <div className="font-semibold text-red-800">{item.name}</div>
+                  {item.timestamp?.toDate && (
+                    <div className="text-xs text-gray-500 mt-1">
+                      {item.timestamp.toDate().toLocaleString('ko-KR')}
+                    </div>
+                  )}
+                </div>
+              ))}
+          </div>
+          {eliminatedList.filter(item => item.activityId === selectedActivity).length > 0 && (
+            <button
+              onClick={() => {
+                if (confirm('현재 활동의 퇴출자 명단을 모두 삭제하시겠습니까?')) {
+                  setEliminatedList(prev => prev.filter(item => item.activityId !== selectedActivity));
+                }
+              }}
+              className="mt-4 w-full px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors text-sm"
+            >
+              명단 초기화
+            </button>
+          )}
         </div>
       )}
 

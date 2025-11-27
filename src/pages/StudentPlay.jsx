@@ -20,6 +20,9 @@ export default function StudentPlay() {
   const [team, setTeam] = useState(null);
   const [userAnswer, setUserAnswer] = useState('');
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false); // 제출 중인지 확인
+  const [isCompleted, setIsCompleted] = useState(false); // 이미 완료된 문제인지 확인
+  const [lastSubmittedAnswer, setLastSubmittedAnswer] = useState(''); // 마지막으로 제출한 답안
   const [result, setResult] = useState(null);
   const [currentScore, setCurrentScore] = useState(0);
   const [showJokerModal, setShowJokerModal] = useState(false);
@@ -47,7 +50,14 @@ export default function StudentPlay() {
         );
         
         if (foundQuestion) {
-          setQuestion({ id: foundQuestion.id, ...foundQuestion.data() });
+          const questionData = { id: foundQuestion.id, ...foundQuestion.data() };
+          setQuestion(questionData);
+          
+          // 이미 완료된 문제인지 확인
+          if (questionData.completed) {
+            setIsCompleted(true);
+            setIsSubmitted(true);
+          }
         } else {
           alert('문제를 찾을 수 없습니다.');
         }
@@ -64,8 +74,17 @@ export default function StudentPlay() {
 
   // 정답 제출
   const handleSubmit = async () => {
-    if (!question || !team || isSubmitted) return;
+    // 제출 중이거나, 이미 완료되었거나, 답안이 비어있거나, 마지막 제출한 답안과 같으면 제출 불가
+    if (!question || !team || isSubmitting || isCompleted || !userAnswer.trim()) {
+      return;
+    }
 
+    // 마지막으로 제출한 답안과 같으면 제출 불가
+    if (lastSubmittedAnswer === userAnswer.trim()) {
+      return;
+    }
+
+    setIsSubmitting(true);
     const isCorrect = checkAnswer(userAnswer, question.answer);
     
     try {
@@ -74,13 +93,24 @@ export default function StudentPlay() {
 
       if (isCorrect) {
         // 정답인 경우
+        const questionRef = doc(teamRef, 'questions', question.id);
+        
+        // 점수 업데이트 및 문제 완료 표시
         await updateDoc(teamRef, {
           score: increment(question.score)
+        });
+        
+        // 문제 문서에 완료 표시
+        await updateDoc(questionRef, {
+          completed: true,
+          completedAt: new Date()
         });
         
         setCurrentScore((prev) => prev + question.score);
         setResult({ type: 'success', message: `미션 완료! +${question.score}점!` });
         setIsSubmitted(true);
+        setIsCompleted(true);
+        setLastSubmittedAnswer(userAnswer.trim());
 
         // 조커 로직
         if (team.type === 'joker') {
@@ -94,13 +124,19 @@ export default function StudentPlay() {
         
         setCurrentScore((prev) => prev - 3);
         setResult({ type: 'error', message: '틀렸습니다. -3점' });
+        setLastSubmittedAnswer(userAnswer.trim()); // 마지막 제출 답안 저장
         // 재시도 가능하도록 isSubmitted는 false 유지
       }
     } catch (error) {
       console.error('점수 업데이트 오류:', error);
       alert('점수 업데이트에 실패했습니다.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
+
+  // 답안이 변경되었는지 확인 (제출 버튼 활성화 여부)
+  const canSubmit = !isSubmitting && !isCompleted && userAnswer.trim() && userAnswer.trim() !== lastSubmittedAnswer;
 
   // 조커 퇴출 처리
   const handleJokerElimination = async () => {
@@ -127,10 +163,11 @@ export default function StudentPlay() {
         });
       });
 
-      // 알림 추가
+      // 알림 추가 (activityId 포함)
       await addDoc(collection(db, 'notifications'), {
         text: `${jokerStudentName} 학생이 퇴출되었습니다!`,
-        timestamp: new Date()
+        timestamp: new Date(),
+        activityId: activityId
       });
 
       setShowJokerModal(false);
@@ -165,26 +202,44 @@ export default function StudentPlay() {
           <h2 className="text-2xl font-bold text-gray-800 mb-6">문제</h2>
           <p className="text-lg text-gray-700 mb-8">{question.questionText}</p>
           
-          {!isSubmitted ? (
+          {isCompleted ? (
+            <div className="text-center">
+              <div className="bg-green-100 text-green-800 p-6 rounded-lg">
+                <p className="text-2xl font-semibold mb-2">미션이 완료되었습니다.</p>
+                <p className="text-lg">+{question.score}점을 획득하셨습니다.</p>
+              </div>
+            </div>
+          ) : !isSubmitted ? (
             <div className="space-y-4">
               <input
                 type="text"
                 value={userAnswer}
                 onChange={(e) => setUserAnswer(e.target.value)}
                 placeholder="답안을 입력하세요"
-                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+                disabled={isSubmitting}
+                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
                 onKeyPress={(e) => {
-                  if (e.key === 'Enter') {
+                  if (e.key === 'Enter' && canSubmit) {
                     handleSubmit();
                   }
                 }}
               />
               <button
                 onClick={handleSubmit}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-lg transition-colors text-lg"
+                disabled={!canSubmit}
+                className={`w-full text-white font-semibold py-3 rounded-lg transition-colors text-lg ${
+                  canSubmit
+                    ? 'bg-blue-600 hover:bg-blue-700 cursor-pointer'
+                    : 'bg-gray-400 cursor-not-allowed'
+                }`}
               >
-                제출
+                {isSubmitting ? '제출 중...' : '제출'}
               </button>
+              {lastSubmittedAnswer && userAnswer.trim() === lastSubmittedAnswer && (
+                <p className="text-sm text-gray-500 text-center">
+                  답안을 수정한 후 다시 제출해주세요.
+                </p>
+              )}
             </div>
           ) : (
             <div className="text-center">
