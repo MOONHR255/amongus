@@ -1,6 +1,7 @@
 // firebase.js
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 
 // 여기에 Firebase 콘솔 설정값 붙여넣기
 const firebaseConfig = {
@@ -17,4 +18,7 @@ const app = initializeApp(firebaseConfig);
 
 // Firestore 인스턴스 생성 및 export
 export const db = getFirestore(app);
+
+// Storage 인스턴스 생성 및 export
+export const storage = getStorage(app);
 

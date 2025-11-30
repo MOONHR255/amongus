@@ -9,7 +9,7 @@ function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
       <div className="text-center">
-        <h1 className="text-6xl font-bold text-white mb-8">Among Us 게임</h1>
+        <h1 className="text-6xl font-bold text-white mb-8">마피아 게임</h1>
         <button
           onClick={() => navigate('/admin')}
           className="bg-white text-purple-900 px-8 py-4 rounded-lg text-xl font-semibold hover:bg-gray-100 transition-colors shadow-lg"

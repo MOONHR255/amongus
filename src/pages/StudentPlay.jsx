@@ -1,7 +1,7 @@
 // StudentPlay.jsx
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { db } from '../firebase';
+import { db, storage } from '../firebase';
 import { 
   doc, 
   getDoc, 
@@ -10,9 +10,18 @@ import {
   updateDoc,
   addDoc,
   increment,
-  runTransaction
+  runTransaction,
+  query,
+  where,
+  orderBy,
+  limit
 } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { checkAnswer } from '../utils/answerChecker';
+import OpenAI from 'openai';
+import imageCompression from 'browser-image-compression';
+
+// OpenAI 클라이언트는 함수 내에서 동적으로 생성
 
 export default function StudentPlay() {
   const { activityId, teamId, questionId } = useParams();
@@ -20,15 +29,27 @@ export default function StudentPlay() {
   const [team, setTeam] = useState(null);
   const [userAnswer, setUserAnswer] = useState('');
   const [isSubmitted, setIsSubmitted] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false); // 제출 중인지 확인
+  const [statusMessage, setStatusMessage] = useState(''); // 제출 상태 메시지: '', 'compressing', 'uploading', 'analyzing', 'completed'
   const [isCompleted, setIsCompleted] = useState(false); // 이미 완료된 문제인지 확인
   const [lastSubmittedAnswer, setLastSubmittedAnswer] = useState(''); // 마지막으로 제출한 답안
   const [result, setResult] = useState(null);
   const [currentScore, setCurrentScore] = useState(0);
   const [showJokerModal, setShowJokerModal] = useState(false);
   const [jokerStudentName, setJokerStudentName] = useState('');
+  
+  // 새로 추가된 상태
+  const [studentName, setStudentName] = useState('');
+  const [studentSolution, setStudentSolution] = useState('');
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [aiFeedback, setAiFeedback] = useState(null);
+  const [isGeneratingFeedback, setIsGeneratingFeedback] = useState(false);
+  const [isCompressingImage, setIsCompressingImage] = useState(false);
+  const [savedImageUrl, setSavedImageUrl] = useState(null); // 복구된 이미지 URL
 
-  // 문제 및 팀 정보 로드
+  // 학생 이름은 localStorage에 저장하지 않음 (매번 빈 칸으로 시작)
+
+  // 문제 및 팀 정보 로드 및 제출 내용 복구
   useEffect(() => {
     const loadData = async () => {
       try {
@@ -58,6 +79,53 @@ export default function StudentPlay() {
             setIsCompleted(true);
             setIsSubmitted(true);
           }
+          
+          // 이전 제출 내용 복구 (submissions 컬렉션에서 최신 기록 가져오기)
+          // 주의: 학생 이름은 복구하지 않음 (새 문제마다 빈 칸으로 시작)
+          try {
+            const submissionsQuery = query(
+              collection(db, 'submissions'),
+              where('activityId', '==', activityId),
+              where('teamId', '==', teamId),
+              where('questionId', '==', questionId),
+              orderBy('submittedAt', 'desc'),
+              limit(1)
+            );
+            
+            const submissionsSnapshot = await getDocs(submissionsQuery);
+            if (!submissionsSnapshot.empty) {
+              const latestSubmission = submissionsSnapshot.docs[0].data();
+              
+              // 상태 복구 (학생 이름 제외)
+              // 학생 이름은 복구하지 않음 - 새 문제마다 빈 칸으로 시작
+              
+              if (latestSubmission.studentSolution) {
+                setStudentSolution(latestSubmission.studentSolution);
+              }
+              
+              if (latestSubmission.aiFeedback) {
+                setAiFeedback(latestSubmission.aiFeedback);
+              }
+              
+              if (latestSubmission.imageUrl) {
+                setSavedImageUrl(latestSubmission.imageUrl);
+                setImagePreview(latestSubmission.imageUrl);
+              }
+              
+              // 정답 여부 확인하여 완료 상태 복구
+              if (latestSubmission.isCorrect) {
+                setIsCompleted(true);
+                setIsSubmitted(true);
+                setResult({ type: 'success', message: `미션 완료! +${questionData.score || 0}점!` });
+              } else {
+                // 오답인 경우 제출 상태만 복구 (재시도 가능)
+                setIsSubmitted(true);
+              }
+            }
+          } catch (submissionError) {
+            console.error('제출 내용 복구 오류:', submissionError);
+            // 제출 내용 복구 실패해도 계속 진행
+          }
         } else {
           alert('문제를 찾을 수 없습니다.');
         }
@@ -72,10 +140,64 @@ export default function StudentPlay() {
     }
   }, [activityId, teamId, questionId]);
 
+  // 퇴출된 학생 확인 함수
+  const checkEliminated = async (name) => {
+    try {
+      const notificationsQuery = query(
+        collection(db, 'notifications'),
+        where('activityId', '==', activityId)
+      );
+      
+      const notificationsSnapshot = await getDocs(notificationsQuery);
+      
+      // 이름을 정규화 (공백 제거)
+      const normalizedName = name.trim();
+      
+      for (const notifDoc of notificationsSnapshot.docs) {
+        const notifData = notifDoc.data();
+        if (notifData.text && notifData.text.includes('퇴출')) {
+          // 알림 텍스트에서 학생 이름 추출 (정확한 패턴만 사용)
+          const text = notifData.text;
+          
+          // "~ 학생이 퇴출되었습니다!" 패턴 (정확한 매칭만)
+          if (text.includes('학생이 퇴출되었습니다')) {
+            // "학생이 퇴출되었습니다" 앞의 텍스트를 정확히 추출
+            const eliminatedName = text.split(' 학생이 퇴출되었습니다')[0].trim();
+            // 정확한 이름 매칭 (부분 문자열이 아닌 완전 일치)
+            if (eliminatedName === normalizedName) {
+              console.log('퇴출 확인됨 (정확한 매칭):', normalizedName);
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    } catch (error) {
+      console.error('퇴출 확인 오류:', error);
+      // 에러 발생 시 제출 허용 (서버 오류 등으로 인한 차단 방지)
+      // 하지만 콘솔에 경고를 남겨서 관리자가 확인할 수 있도록 함
+      return false;
+    }
+  };
+
   // 정답 제출
   const handleSubmit = async () => {
+    // 1. 퇴출된 학생인지 확인 (가장 먼저 검사 - 함수 시작 즉시, 이름이 없어도 체크)
+    // 이름이 비어있으면 먼저 이름 입력 요청
+    if (!studentName || !studentName.trim()) {
+      alert('학생 이름을 입력해주세요.');
+      return;
+    }
+    
+    // 퇴출 확인은 반드시 이름 입력 후 실행
+    const isEliminated = await checkEliminated(studentName.trim());
+    if (isEliminated) {
+      alert("이미 퇴출된 플레이어입니다. 답안을 제출할 수 없습니다.");
+      return; // 즉시 함수 종료 - 절대 뒤쪽 로직 실행 안 됨
+    }
+
     // 제출 중이거나, 이미 완료되었거나, 답안이 비어있거나, 마지막 제출한 답안과 같으면 제출 불가
-    if (!question || !team || isSubmitting || isCompleted || !userAnswer.trim()) {
+    if (!question || !team || statusMessage || isCompleted || !userAnswer.trim()) {
       return;
     }
 
@@ -84,12 +206,61 @@ export default function StudentPlay() {
       return;
     }
 
-    setIsSubmitting(true);
     const isCorrect = checkAnswer(userAnswer, question.answer);
+    let imageUrl = null;
+    let timeoutId = null;
     
+    // 타임아웃 설정 (30초)
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error('타임아웃'));
+      }, 30000);
+    });
+
     try {
       const activityRef = doc(db, 'activities', activityId);
       const teamRef = doc(activityRef, 'teams', teamId);
+
+      // 사진이 있으면 업로드 처리 (이미 파일 선택 시 압축 완료됨)
+      if (selectedImage) {
+        try {
+          // 1단계: 이미지 압축 완료 표시 (이미 압축된 파일이지만 사용자에게 알림)
+          setStatusMessage('📸 사진 줄이는 중...');
+          // 이미 압축된 파일이므로 짧은 대기 후 바로 다음 단계로
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          // 2단계: Firebase Storage 업로드
+          setStatusMessage('☁️ 서버에 올리는 중...');
+          
+          try {
+            // 업로드 경로 단순화
+            const imageRef = ref(storage, `submissions/${activityId}/${Date.now()}_${selectedImage.name}`);
+            
+            // 업로드 실행
+            await uploadBytes(imageRef, selectedImage);
+            
+            // 다운로드 URL 가져오기
+            imageUrl = await getDownloadURL(imageRef);
+            console.log('이미지 업로드 성공:', imageUrl);
+          } catch (uploadError) {
+            console.error('이미지 업로드 오류 상세:', uploadError);
+            const errorMessage = uploadError.message || '알 수 없는 오류';
+            alert(`이미지 업로드 실패: ${errorMessage}\n잠시 후 다시 시도해주세요.`);
+            setStatusMessage('');
+            return;
+          }
+        } catch (error) {
+          if (error.message === '타임아웃') {
+            alert('시간이 너무 오래 걸립니다. 다시 시도해주세요.');
+            setStatusMessage('');
+            return;
+          }
+          console.error('이미지 처리 오류:', error);
+          alert(`이미지 처리 오류: ${error.message || '알 수 없는 오류'}\n잠시 후 다시 시도해주세요.`);
+          setStatusMessage('');
+          return;
+        }
+      }
 
       if (isCorrect) {
         // 정답인 경우
@@ -111,6 +282,8 @@ export default function StudentPlay() {
         setIsSubmitted(true);
         setIsCompleted(true);
         setLastSubmittedAnswer(userAnswer.trim());
+        // 제출 후 이름은 빈 칸으로 초기화
+        setStudentName('');
 
         // 조커 로직
         if (team.type === 'joker') {
@@ -125,18 +298,235 @@ export default function StudentPlay() {
         setCurrentScore((prev) => prev - 3);
         setResult({ type: 'error', message: '틀렸습니다. -3점' });
         setLastSubmittedAnswer(userAnswer.trim()); // 마지막 제출 답안 저장
-        // 재시도 가능하도록 isSubmitted는 false 유지
+        
+        // 제출 직후 풀이를 보여주기 위해 이미지 URL 저장
+        if (imageUrl) {
+          setSavedImageUrl(imageUrl);
+        }
+        
+        // 제출 직후 화면 표시를 위해 isSubmitted를 true로 설정 (재시도는 나중에 가능)
+        setIsSubmitted(true);
+        // 제출 후 이름은 빈 칸으로 초기화
+        setStudentName('');
       }
+
+      // 서술형 풀이가 있으면 AI 피드백 생성 (정답/오답 모두 허용)
+      // 이미지가 없어도 텍스트만 있어도 피드백 작동하도록 수정
+      if (studentSolution.trim() || imageUrl) {
+        // API Key 확인 (Vite 환경 변수 규칙 준수)
+        console.log("API Key 확인:", import.meta.env.VITE_OPENAI_API_KEY);
+        const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
+        if (!apiKey || !apiKey.trim()) {
+          alert('API Key가 설정되지 않았습니다. .env 파일을 확인하세요.');
+          setStatusMessage('');
+          return;
+        }
+
+        // OpenAI 클라이언트 생성 (매번 새로 생성하여 API Key 확인)
+        const openaiClient = new OpenAI({
+          apiKey: apiKey,
+          dangerouslyAllowBrowser: true
+        });
+
+        // 3단계: AI 분석
+        setStatusMessage('🤖 AI가 읽는 중...');
+        setIsGeneratingFeedback(true);
+        
+        try {
+          // 교육과정 내용 가져오기 (문제 또는 활동에서)
+          let educationalContext = '';
+          if (question.educationalContext) {
+            educationalContext = question.educationalContext;
+          } else {
+            // 활동에서 가져오기
+            const activitySnap = await getDoc(doc(db, 'activities', activityId));
+            if (activitySnap.exists() && activitySnap.data().educationalContext) {
+              educationalContext = activitySnap.data().educationalContext;
+            }
+          }
+
+          // 정답 여부에 따라 다른 톤으로 피드백
+          const isCorrectMessage = isCorrect 
+            ? '학생이 정답을 맞췄으니 칭찬하는 톤으로 답변해줘.'
+            : '학생이 틀렸으니 격려하고 힌트를 주는 톤으로 답변해줘.';
+          
+          const systemMessage = `너는 친절한 초중고 수학 선생님이야. 학생의 풀이를 보고 50자~100자 이내로 짧고 명확하게 피드백해줘. ${isCorrectMessage} ${educationalContext ? `educationalContext(교과서 내용): ${educationalContext} 이걸 바탕으로 설명해줘.` : ''}`;
+
+          // 메시지 구성: 이미지가 있는 경우와 없는 경우를 명확히 구분
+          let userMessage;
+          
+          if (imageUrl) {
+            // 이미지가 있는 경우: content를 배열로 구성 (text + image_url)
+            const textContent = studentSolution.trim() 
+              ? `문제: ${question.questionText}\n\n학생 풀이: ${studentSolution.trim()}`
+              : `문제: ${question.questionText}\n\n학생이 사진으로 풀이를 제출했습니다.`;
+            
+            userMessage = {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: textContent
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: imageUrl // Firebase Storage에서 받은 downloadURL만 사용
+                  }
+                }
+              ]
+            };
+          } else {
+            // 이미지가 없는 경우: content를 단순 문자열로
+            const textContent = `문제: ${question.questionText}\n\n학생 풀이: ${studentSolution.trim()}`;
+            userMessage = {
+              role: 'user',
+              content: textContent
+            };
+          }
+
+          const messages = [
+            {
+              role: 'system',
+              content: systemMessage
+            },
+            userMessage
+          ];
+
+          console.log('AI 호출 시작...', { model: 'gpt-4o', messagesCount: messages.length });
+          
+          // OpenAI 호출 (강화된 try-catch)
+          const aiPromise = openaiClient.chat.completions.create({
+            model: 'gpt-4o',
+            messages: messages,
+            max_tokens: 300
+          });
+
+          const completion = await Promise.race([aiPromise, timeoutPromise]);
+          console.log('AI 응답 받음:', completion);
+          
+          const feedback = completion.choices[0]?.message?.content;
+          if (!feedback) {
+            throw new Error('AI 피드백 내용이 없습니다.');
+          }
+          
+          console.log('AI 피드백:', feedback);
+          setAiFeedback(feedback);
+          
+          // 제출 직후 이미지 URL 저장 (화면 표시용)
+          if (imageUrl) {
+            setSavedImageUrl(imageUrl);
+          }
+
+          // submissions 컬렉션에 저장 (teamName 포함)
+          await addDoc(collection(db, 'submissions'), {
+            studentName: studentName.trim(),
+            teamName: team.name || '알 수 없음',
+            activityId: activityId,
+            teamId: teamId,
+            questionId: questionId,
+            questionText: question.questionText,
+            studentSolution: studentSolution.trim() || '',
+            imageUrl: imageUrl || null,
+            aiFeedback: feedback,
+            submittedAt: new Date(),
+            isCorrect: isCorrect
+          });
+          console.log('submissions 저장 완료');
+        } catch (feedbackError) {
+          if (feedbackError.message === '타임아웃') {
+            alert('시간이 너무 오래 걸립니다. 다시 시도해주세요.');
+            setStatusMessage('');
+            setIsGeneratingFeedback(false);
+            return;
+          }
+          
+          // 상세한 에러 로깅 및 사용자 알림
+          console.error('AI 피드백 생성 오류 전체:', feedbackError);
+          const errorMessage = feedbackError.message || '알 수 없는 오류';
+          alert(`AI 오류 발생: ${errorMessage}`);
+          
+          // 피드백 생성 실패해도 기본 정보는 저장 (teamName 포함)
+          try {
+            await addDoc(collection(db, 'submissions'), {
+              studentName: studentName.trim(),
+              teamName: team.name || '알 수 없음',
+              activityId: activityId,
+              teamId: teamId,
+              questionId: questionId,
+              questionText: question.questionText,
+              studentSolution: studentSolution.trim() || '',
+              imageUrl: imageUrl || null,
+              aiFeedback: null,
+              submittedAt: new Date(),
+              isCorrect: isCorrect
+            });
+          } catch (saveError) {
+            console.error('제출 정보 저장 오류:', saveError);
+          }
+          setStatusMessage('');
+          setIsGeneratingFeedback(false);
+        }
+      } else if ((studentSolution.trim() || imageUrl)) {
+        // OpenAI API 키가 없거나 AI 피드백이 실패한 경우에도 기본 정보는 저장 (teamName 포함)
+        // 제출 직후 이미지 URL 저장 (화면 표시용)
+        if (imageUrl) {
+          setSavedImageUrl(imageUrl);
+        }
+        
+        try {
+          await addDoc(collection(db, 'submissions'), {
+            studentName: studentName.trim(),
+            teamName: team.name || '알 수 없음',
+            activityId: activityId,
+            teamId: teamId,
+            questionId: questionId,
+            questionText: question.questionText,
+            studentSolution: studentSolution.trim() || '',
+            imageUrl: imageUrl || null,
+            aiFeedback: null,
+            submittedAt: new Date(),
+            isCorrect: isCorrect
+          });
+        } catch (saveError) {
+          console.error('제출 정보 저장 오류:', saveError);
+          alert('잠시 후 다시 시도해주세요.');
+        }
+      }
+      
+      // 제출 직후 이미지 URL 저장 (AI 피드백 없이도 이미지 표시용)
+      if (imageUrl && !savedImageUrl) {
+        setSavedImageUrl(imageUrl);
+      }
+
+      // 4단계: 완료
+      setStatusMessage('완료!');
+      setIsGeneratingFeedback(false);
+      
+      // 완료 메시지를 잠깐 보여준 후 초기화
+      setTimeout(() => {
+        setStatusMessage('');
+      }, 1000);
+      
     } catch (error) {
-      console.error('점수 업데이트 오류:', error);
-      alert('점수 업데이트에 실패했습니다.');
+      if (error.message === '타임아웃') {
+        alert('시간이 너무 오래 걸립니다. 다시 시도해주세요.');
+      } else {
+        console.error('제출 처리 오류:', error);
+        alert('잠시 후 다시 시도해주세요.');
+      }
+      setStatusMessage('');
+      setIsGeneratingFeedback(false);
     } finally {
-      setIsSubmitting(false);
+      // 타임아웃 타이머 정리
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   };
 
   // 답안이 변경되었는지 확인 (제출 버튼 활성화 여부)
-  const canSubmit = !isSubmitting && !isCompleted && userAnswer.trim() && userAnswer.trim() !== lastSubmittedAnswer;
+  const canSubmit = !statusMessage && !isCompleted && userAnswer.trim() && userAnswer.trim() !== lastSubmittedAnswer && studentName.trim();
 
   // 조커 퇴출 처리
   const handleJokerElimination = async () => {
@@ -146,6 +536,13 @@ export default function StudentPlay() {
     }
 
     try {
+      // 중복 퇴출 방지: 이미 퇴출된 학생인지 확인
+      const isAlreadyEliminated = await checkEliminated(jokerStudentName.trim());
+      if (isAlreadyEliminated) {
+        alert('이미 퇴출된 학생입니다.');
+        return; // Firestore에 중복 저장하지 않음
+      }
+
       const activityRef = doc(db, 'activities', activityId);
       
       // Transaction으로 모든 시민 팀 점수 차감
@@ -203,37 +600,182 @@ export default function StudentPlay() {
           <p className="text-lg text-gray-700 mb-8">{question.questionText}</p>
           
           {isCompleted ? (
-            <div className="text-center">
-              <div className="bg-green-100 text-green-800 p-6 rounded-lg">
+            <div className="space-y-4">
+              <div className="bg-green-100 text-green-800 p-6 rounded-lg text-center">
                 <p className="text-2xl font-semibold mb-2">미션이 완료되었습니다.</p>
                 <p className="text-lg">+{question.score}점을 획득하셨습니다.</p>
               </div>
+              
+              {/* 학생이 작성한 풀이 내용 */}
+              {(studentSolution || savedImageUrl) && (
+                <div className="bg-gray-100 border-2 border-gray-300 rounded-lg p-4">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-3">내가 작성한 풀이</h3>
+                  {studentSolution && (
+                    <div className="bg-white p-4 rounded-lg mb-3">
+                      <p className="text-gray-700 whitespace-pre-wrap">{studentSolution}</p>
+                    </div>
+                  )}
+                  {savedImageUrl && (
+                    <div className="bg-white p-4 rounded-lg">
+                      <p className="text-sm text-gray-600 mb-2">풀이 사진</p>
+                      <img
+                        src={savedImageUrl}
+                        alt="제출한 풀이 사진"
+                        className="max-w-full h-auto rounded-lg border border-gray-300"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {/* AI 피드백 */}
+              {isGeneratingFeedback && (
+                <div className="bg-blue-50 text-blue-800 p-4 rounded-lg">
+                  <p className="font-semibold">🤖 AI 피드백 생성 중...</p>
+                </div>
+              )}
+              {aiFeedback && !isGeneratingFeedback && (
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-300 p-6 rounded-lg">
+                  <h3 className="text-xl font-bold text-purple-800 mb-3">🤖 AI 선생님의 한마디</h3>
+                  <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{aiFeedback}</p>
+                </div>
+              )}
             </div>
           ) : !isSubmitted ? (
             <div className="space-y-4">
-              <input
-                type="text"
-                value={userAnswer}
-                onChange={(e) => setUserAnswer(e.target.value)}
-                placeholder="답안을 입력하세요"
-                disabled={isSubmitting}
-                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
-                onKeyPress={(e) => {
-                  if (e.key === 'Enter' && canSubmit) {
-                    handleSubmit();
-                  }
-                }}
-              />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  작성자 이름 <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={studentName}
+                  onChange={(e) => {
+                    setStudentName(e.target.value);
+                  }}
+                  placeholder="이름을 입력하세요"
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  서술형 풀이
+                </label>
+                <textarea
+                  value={studentSolution}
+                  onChange={(e) => setStudentSolution(e.target.value)}
+                  placeholder="풀이 과정을 글로 적거나 사진을 찍어주세요"
+                  rows={5}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  풀이 사진 업로드
+                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={async (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                      setIsCompressingImage(true);
+                      try {
+                        // 이미지 압축 옵션 (아주 강력하게)
+                        const options = {
+                          maxSizeMB: 0.2, // 최대 용량 200KB
+                          maxWidthOrHeight: 800, // 최대 해상도 800px
+                          useWebWorker: true,
+                          fileType: file.type
+                        };
+
+                        // 이미지 압축
+                        const compressedFile = await imageCompression(file, options);
+                        
+                        // 압축된 파일을 state에 저장
+                        setSelectedImage(compressedFile);
+                        
+                        // 미리보기 생성
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                          setImagePreview(reader.result);
+                          setIsCompressingImage(false);
+                        };
+                        reader.readAsDataURL(compressedFile);
+                      } catch (error) {
+                        console.error('이미지 압축 오류:', error);
+                        alert('이미지 압축에 실패했습니다. 원본 파일을 사용합니다.');
+                        // 압축 실패 시 원본 파일 사용
+                        setSelectedImage(file);
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                          setImagePreview(reader.result);
+                          setIsCompressingImage(false);
+                        };
+                        reader.readAsDataURL(file);
+                      }
+                    }
+                  }}
+                  disabled={isCompressingImage}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
+                />
+                {isCompressingImage && (
+                  <p className="text-sm text-blue-600 mt-2">📷 이미지 압축 중...</p>
+                )}
+                {imagePreview && (
+                  <div className="mt-3">
+                    <img
+                      src={imagePreview}
+                      alt="미리보기"
+                      className="max-w-full h-auto rounded-lg border border-gray-300"
+                    />
+                    <button
+                      onClick={() => {
+                        setSelectedImage(null);
+                        setImagePreview(null);
+                        // 파일 input 초기화
+                        const fileInput = document.querySelector('input[type="file"]');
+                        if (fileInput) fileInput.value = '';
+                      }}
+                      className="mt-2 text-sm text-red-600 hover:text-red-700"
+                    >
+                      사진 제거
+                    </button>
+                  </div>
+                )}
+              </div>
+              
+              <div className="border-t-2 border-gray-300 pt-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  정답 입력
+                </label>
+                <input
+                  type="text"
+                  value={userAnswer}
+                  onChange={(e) => setUserAnswer(e.target.value)}
+                  placeholder="답안을 입력하세요"
+                  disabled={!!statusMessage}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter' && canSubmit) {
+                      handleSubmit();
+                    }
+                  }}
+                />
+              </div>
+              
               <button
                 onClick={handleSubmit}
-                disabled={!canSubmit}
+                disabled={!canSubmit || !studentName.trim() || !!statusMessage}
                 className={`w-full text-white font-semibold py-3 rounded-lg transition-colors text-lg ${
-                  canSubmit
+                  canSubmit && studentName.trim() && !statusMessage
                     ? 'bg-blue-600 hover:bg-blue-700 cursor-pointer'
                     : 'bg-gray-400 cursor-not-allowed'
                 }`}
               >
-                {isSubmitting ? '제출 중...' : '제출'}
+                {statusMessage || '제출하기'}
               </button>
               {lastSubmittedAnswer && userAnswer.trim() === lastSubmittedAnswer && (
                 <p className="text-sm text-gray-500 text-center">
@@ -242,9 +784,10 @@ export default function StudentPlay() {
               )}
             </div>
           ) : (
-            <div className="text-center">
+            <div className="space-y-4">
+              {/* 결과 메시지 */}
               <div
-                className={`p-4 rounded-lg ${
+                className={`p-4 rounded-lg text-center ${
                   result?.type === 'success'
                     ? 'bg-green-100 text-green-800'
                     : 'bg-red-100 text-red-800'
@@ -252,6 +795,58 @@ export default function StudentPlay() {
               >
                 <p className="text-xl font-semibold">{result?.message}</p>
               </div>
+              
+              {/* 학생이 작성한 풀이 내용 */}
+              {(studentSolution || savedImageUrl) && (
+                <div className="bg-gray-100 border-2 border-gray-300 rounded-lg p-4">
+                  <h3 className="text-lg font-semibold text-gray-800 mb-3">내가 작성한 풀이</h3>
+                  {studentSolution && (
+                    <div className="bg-white p-4 rounded-lg mb-3">
+                      <p className="text-gray-700 whitespace-pre-wrap">{studentSolution}</p>
+                    </div>
+                  )}
+                  {savedImageUrl && (
+                    <div className="bg-white p-4 rounded-lg">
+                      <p className="text-sm text-gray-600 mb-2">풀이 사진</p>
+                      <img
+                        src={savedImageUrl}
+                        alt="제출한 풀이 사진"
+                        className="max-w-full h-auto rounded-lg border border-gray-300"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              {/* AI 피드백 */}
+              {isGeneratingFeedback && (
+                <div className="bg-blue-50 text-blue-800 p-4 rounded-lg">
+                  <p className="font-semibold">🤖 AI 피드백 생성 중...</p>
+                </div>
+              )}
+              {aiFeedback && !isGeneratingFeedback && (
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-300 p-6 rounded-lg">
+                  <h3 className="text-xl font-bold text-purple-800 mb-3">🤖 AI 선생님의 한마디</h3>
+                  <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{aiFeedback}</p>
+                </div>
+              )}
+              
+              {/* 오답인 경우 정답 다시 제출 버튼 */}
+              {!isCompleted && (
+                <button
+                  onClick={() => {
+                    // 제출 상태 초기화하여 다시 입력할 수 있게 함
+                    setIsSubmitted(false);
+                    setResult(null);
+                    // 학생 이름은 빈 칸으로 초기화
+                    setStudentName('');
+                    // 풀이와 정답은 유지 (수정 가능하도록)
+                  }}
+                  className="w-full mt-4 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors"
+                >
+                  정답 다시 제출
+                </button>
+              )}
             </div>
           )}
 

@@ -32,12 +32,16 @@ export default function AdminDashboard() {
   
   // 폼 상태
   const [newActivityName, setNewActivityName] = useState('');
+  const [newActivityEducationalContext, setNewActivityEducationalContext] = useState('');
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamType, setNewTeamType] = useState('citizen');
   const [selectedTeamForQuestion, setSelectedTeamForQuestion] = useState('');
   const [newQuestionText, setNewQuestionText] = useState('');
   const [newQuestionAnswer, setNewQuestionAnswer] = useState('');
   const [newQuestionScore, setNewQuestionScore] = useState(10);
+  const [newQuestionEducationalContext, setNewQuestionEducationalContext] = useState('');
+  const [submissions, setSubmissions] = useState([]);
+  const [showSubmissions, setShowSubmissions] = useState(false);
 
   // 로그인 처리
   const handleLogin = (e) => {
@@ -45,21 +49,44 @@ export default function AdminDashboard() {
     if (password === ADMIN_PASSWORD) {
       setIsAuthenticated(true);
       setPassword('');
+      // 로그인 상태를 localStorage에 저장
+      localStorage.setItem('adminAuthenticated', 'true');
     } else {
       alert('비밀번호가 올바르지 않습니다.');
     }
   };
+
+  // 로그아웃 처리
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    localStorage.removeItem('adminAuthenticated');
+  };
+
+  // 컴포넌트 마운트 시 로그인 상태 복구
+  useEffect(() => {
+    const savedAuth = localStorage.getItem('adminAuthenticated');
+    if (savedAuth === 'true') {
+      setIsAuthenticated(true);
+    }
+  }, []);
 
   // 활동 생성
   const handleCreateActivity = async () => {
     if (!newActivityName.trim()) return;
     
     try {
-      await addDoc(collection(db, 'activities'), {
+      const activityData = {
         name: newActivityName,
         createdAt: new Date()
-      });
+      };
+      
+      if (newActivityEducationalContext.trim()) {
+        activityData.educationalContext = newActivityEducationalContext.trim();
+      }
+      
+      await addDoc(collection(db, 'activities'), activityData);
       setNewActivityName('');
+      setNewActivityEducationalContext('');
       loadActivities();
     } catch (error) {
       console.error('활동 생성 오류:', error);
@@ -209,11 +236,17 @@ export default function AdminDashboard() {
       const activityRef = doc(db, 'activities', selectedActivity);
       const teamRef = doc(activityRef, 'teams', selectedTeamForQuestion);
       
-      const docRef = await addDoc(collection(teamRef, 'questions'), {
+      const questionData = {
         questionText: newQuestionText,
         answer: newQuestionAnswer,
         score: parseInt(newQuestionScore)
-      });
+      };
+      
+      if (newQuestionEducationalContext.trim()) {
+        questionData.educationalContext = newQuestionEducationalContext.trim();
+      }
+      
+      const docRef = await addDoc(collection(teamRef, 'questions'), questionData);
       
       // questionId 필드에 문서 ID 저장
       await updateDoc(docRef, {
@@ -223,6 +256,7 @@ export default function AdminDashboard() {
       setNewQuestionText('');
       setNewQuestionAnswer('');
       setNewQuestionScore(10);
+      setNewQuestionEducationalContext('');
       loadTeams();
     } catch (error) {
       console.error('문제 추가 오류:', error);
@@ -407,6 +441,57 @@ export default function AdminDashboard() {
     }
   }, [isAuthenticated]);
 
+  // submissions 컬렉션 실시간 감시 (안전한 정렬)
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      query(collection(db, 'submissions'), orderBy('submittedAt', 'desc')),
+      (snapshot) => {
+        const submissionsList = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        
+        // createdAt이 있으면 createdAt 기준으로, 없으면 submittedAt 기준으로 정렬
+        const sortedSubmissions = submissionsList.sort((a, b) => {
+          let timeA = 0;
+          let timeB = 0;
+          
+          // createdAt 또는 submittedAt 중 사용 가능한 것 사용
+          if (a.createdAt?.toDate) {
+            timeA = a.createdAt.toDate().getTime();
+          } else if (a.submittedAt?.toDate) {
+            timeA = a.submittedAt.toDate().getTime();
+          } else if (a.createdAt?.seconds) {
+            timeA = a.createdAt.seconds * 1000;
+          } else if (a.submittedAt?.seconds) {
+            timeA = a.submittedAt.seconds * 1000;
+          }
+          
+          if (b.createdAt?.toDate) {
+            timeB = b.createdAt.toDate().getTime();
+          } else if (b.submittedAt?.toDate) {
+            timeB = b.submittedAt.toDate().getTime();
+          } else if (b.createdAt?.seconds) {
+            timeB = b.createdAt.seconds * 1000;
+          } else if (b.submittedAt?.seconds) {
+            timeB = b.submittedAt.seconds * 1000;
+          }
+          
+          return timeB - timeA; // 내림차순 (최신이 먼저)
+        });
+        
+        setSubmissions(sortedSubmissions);
+      },
+      (error) => {
+        console.error('submissions 실시간 감시 오류:', error);
+        // 에러 발생 시 빈 배열로 설정
+        setSubmissions([]);
+      }
+    );
+    
+    return () => unsubscribe();
+  }, []);
+
   // 로그인 화면
   if (!isAuthenticated) {
     return (
@@ -481,9 +566,29 @@ export default function AdminDashboard() {
           </div>
           {eliminatedList.filter(item => item.activityId === selectedActivity).length > 0 && (
             <button
-              onClick={() => {
-                if (confirm('현재 활동의 퇴출자 명단을 모두 삭제하시겠습니까?')) {
-                  setEliminatedList(prev => prev.filter(item => item.activityId !== selectedActivity));
+              onClick={async () => {
+                if (confirm('현재 활동의 퇴출자 명단을 모두 삭제하시겠습니까?\nFirestore의 퇴출 알림도 함께 삭제됩니다.')) {
+                  try {
+                    // Firestore의 notifications 컬렉션에서 해당 활동의 퇴출 알림 삭제
+                    const notificationsToDelete = eliminatedList.filter(item => item.activityId === selectedActivity);
+                    
+                    for (const eliminatedItem of notificationsToDelete) {
+                      if (eliminatedItem.id) {
+                        try {
+                          await deleteDoc(doc(db, 'notifications', eliminatedItem.id));
+                        } catch (deleteError) {
+                          console.error('알림 삭제 오류:', deleteError);
+                        }
+                      }
+                    }
+                    
+                    // 로컬 state에서도 제거
+                    setEliminatedList(prev => prev.filter(item => item.activityId !== selectedActivity));
+                    alert('퇴출자 명단이 초기화되었습니다.');
+                  } catch (error) {
+                    console.error('명단 초기화 오류:', error);
+                    alert('명단 초기화 중 오류가 발생했습니다.');
+                  }
                 }
               }}
               className="mt-4 w-full px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors text-sm"
@@ -495,25 +600,47 @@ export default function AdminDashboard() {
       )}
 
       <div className="max-w-7xl mx-auto">
-        <h1 className="text-4xl font-bold text-gray-800 mb-8">관리자 대시보드</h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-4xl font-bold text-gray-800">관리자 대시보드</h1>
+          <button
+            onClick={handleLogout}
+            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg transition-colors"
+          >
+            로그아웃
+          </button>
+        </div>
 
         {/* 활동 생성 */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
           <h2 className="text-2xl font-semibold text-gray-700 mb-4">활동 생성</h2>
-          <div className="flex gap-4">
-            <input
-              type="text"
-              value={newActivityName}
-              onChange={(e) => setNewActivityName(e.target.value)}
-              placeholder="활동 이름"
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              onClick={handleCreateActivity}
-              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              활동 생성
-            </button>
+          <div className="space-y-4">
+            <div className="flex gap-4">
+              <input
+                type="text"
+                value={newActivityName}
+                onChange={(e) => setNewActivityName(e.target.value)}
+                placeholder="활동 이름"
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              />
+              <button
+                onClick={handleCreateActivity}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                활동 생성
+              </button>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                관련 교과서 핵심 내용 및 성취기준 (선택사항)
+              </label>
+              <textarea
+                value={newActivityEducationalContext}
+                onChange={(e) => setNewActivityEducationalContext(e.target.value)}
+                placeholder="활동과 관련된 교과서 핵심 내용 및 성취기준을 입력하세요"
+                rows={3}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
           </div>
         </div>
 
@@ -664,20 +791,37 @@ export default function AdminDashboard() {
                   placeholder="정답"
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                 />
-                <div className="flex gap-4">
-                  <input
-                    type="number"
-                    value={newQuestionScore}
-                    onChange={(e) => setNewQuestionScore(e.target.value)}
-                    placeholder="배점"
-                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    문제 점수
+                  </label>
+                  <div className="flex gap-4">
+                    <input
+                      type="number"
+                      value={newQuestionScore}
+                      onChange={(e) => setNewQuestionScore(e.target.value)}
+                      placeholder="배점"
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button
+                      onClick={handleAddQuestion}
+                      className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
+                    >
+                      문제 추가
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    관련 교과서 핵심 내용 및 성취기준 (선택사항)
+                  </label>
+                  <textarea
+                    value={newQuestionEducationalContext}
+                    onChange={(e) => setNewQuestionEducationalContext(e.target.value)}
+                    placeholder="문제와 관련된 교과서 핵심 내용 및 성취기준을 입력하세요"
+                    rows={4}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                   />
-                  <button
-                    onClick={handleAddQuestion}
-                    className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
-                  >
-                    문제 추가
-                  </button>
                 </div>
               </div>
             </div>
@@ -694,6 +838,15 @@ export default function AdminDashboard() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {questions[team.id]?.map((question) => {
                         const qrUrl = `${window.location.origin}/play/${selectedActivity}/${team.id}/${question.questionId || question.id}`;
+                        
+                        // 해당 문제의 정답 제출자 찾기
+                        const completedSubmission = submissions.find(sub => 
+                          sub.activityId === selectedActivity &&
+                          sub.teamId === team.id &&
+                          sub.questionId === (question.questionId || question.id) &&
+                          sub.isCorrect === true
+                        );
+                        
                         return (
                           <div
                             key={question.id}
@@ -703,6 +856,11 @@ export default function AdminDashboard() {
                               <p className="font-semibold">문제: {question.questionText}</p>
                               <p className="text-sm text-gray-600">정답: {question.answer}</p>
                               <p className="text-sm text-blue-600">배점: {question.score}점</p>
+                              {question.completed && completedSubmission && (
+                                <p className="text-sm text-green-600 mt-1 font-semibold">
+                                  ✅ 제출 완료, 제출자: {completedSubmission.studentName || '알 수 없음'}
+                                </p>
+                              )}
                             </div>
                             <div className="flex gap-2 mb-4">
                               <button
@@ -739,8 +897,129 @@ export default function AdminDashboard() {
                 ))}
               </div>
             </div>
+
           </>
         )}
+
+        {/* 학생 실시간 답변 현황 (전체 submissions) */}
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <h2 className="text-2xl font-semibold text-gray-700 mb-4">학생 실시간 답변 현황</h2>
+          {submissions.length === 0 ? (
+            <p className="text-gray-500 text-center py-8">아직 제출된 답변이 없습니다.</p>
+          ) : (
+            <div className="space-y-4 max-h-[600px] overflow-y-auto">
+              {submissions.map((submission) => {
+                // 정답/오답 여부에 따라 테두리 색상 결정
+                const borderColor = submission?.isCorrect 
+                  ? 'border-green-500' 
+                  : 'border-red-500';
+                
+                // 시간 가져오기 (안전하게)
+                let displayTime = '알 수 없음';
+                if (submission?.createdAt?.toDate) {
+                  displayTime = submission.createdAt.toDate().toLocaleString('ko-KR');
+                } else if (submission?.submittedAt?.toDate) {
+                  displayTime = submission.submittedAt.toDate().toLocaleString('ko-KR');
+                } else if (submission?.createdAt?.seconds) {
+                  displayTime = new Date(submission.createdAt.seconds * 1000).toLocaleString('ko-KR');
+                } else if (submission?.submittedAt?.seconds) {
+                  displayTime = new Date(submission.submittedAt.seconds * 1000).toLocaleString('ko-KR');
+                }
+                
+                return (
+                  <div
+                    key={submission?.id}
+                    className={`border-2 ${borderColor} rounded-lg p-4 hover:shadow-lg transition-shadow bg-white`}
+                  >
+                    {/* 학생 정보 및 문제 정보 */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">학생 이름</p>
+                        <p className="font-semibold text-gray-800">
+                          {submission?.studentName || '미입력'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">팀 이름</p>
+                        <p className="font-semibold text-gray-800">
+                          {submission?.teamName || '팀 정보 없음'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-gray-600 mb-1">문제</p>
+                        <p className="font-semibold text-gray-800 line-clamp-2">
+                          {submission?.questionText || '알 수 없음'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 풀이 내용 */}
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm font-medium text-gray-700 mb-2">풀이 내용</p>
+                      
+                      {/* 텍스트 풀이 */}
+                      {(submission?.studentSolution || submission?.explanationText || submission?.text) && (
+                        <div className="bg-gray-50 p-3 rounded-lg">
+                          <p className="text-gray-700 whitespace-pre-wrap">
+                            {submission?.studentSolution || submission?.explanationText || submission?.text}
+                          </p>
+                        </div>
+                      )}
+                      
+                      {/* 사진 (썸네일, 클릭 시 새 창에서 원본 보기) */}
+                      {submission?.imageUrl && (
+                        <div className="mt-2">
+                          <p className="text-sm text-gray-600 mb-2">풀이 사진</p>
+                          <a
+                            href={submission.imageUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-block cursor-pointer hover:opacity-80 transition-opacity"
+                          >
+                            <img
+                              src={submission.imageUrl}
+                              alt="학생 풀이 사진"
+                              className="max-w-xs max-h-48 rounded-lg border border-gray-300 object-contain"
+                            />
+                            <p className="text-xs text-blue-600 mt-1">클릭하여 원본 보기</p>
+                          </a>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* AI 피드백 */}
+                    {submission?.aiFeedback && (
+                      <div className="mt-3">
+                        <p className="text-sm font-medium text-gray-700 mb-2">🤖 AI 피드백</p>
+                        <div className="bg-blue-50 p-3 rounded-lg border-l-4 border-blue-500">
+                          <p className="text-gray-700 whitespace-pre-wrap">
+                            {submission.aiFeedback}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 제출 시간 및 정답 여부 */}
+                    <div className="mt-3 flex justify-between items-center pt-3 border-t border-gray-200">
+                      <p className="text-xs text-gray-500">
+                        제출 시간: {displayTime}
+                      </p>
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                          submission?.isCorrect
+                            ? 'bg-green-100 text-green-800'
+                            : 'bg-red-100 text-red-800'
+                        }`}
+                      >
+                        {submission?.isCorrect ? '정답' : '오답'}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
