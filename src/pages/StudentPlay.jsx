@@ -36,12 +36,14 @@ export default function StudentPlay() {
   const [currentScore, setCurrentScore] = useState(0);
   const [showJokerModal, setShowJokerModal] = useState(false);
   const [jokerStudentName, setJokerStudentName] = useState('');
-  
+
   // 새로 추가된 상태
   const [studentName, setStudentName] = useState('');
   const [studentSolution, setStudentSolution] = useState('');
-  const [selectedImage, setSelectedImage] = useState(null);
-  const [imagePreview, setImagePreview] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null); // 사용자가 선택한 원본 파일 객체
+  const [selectedImage, setSelectedImage] = useState(null); // 압축된 파일 객체 (업로드용)
+  const [imagePreview, setImagePreview] = useState(null); // 미리보기용 base64 URL
+  const [uploading, setUploading] = useState(false); // 업로드 중 로딩 표시용
   const [aiFeedback, setAiFeedback] = useState(null);
   const [isGeneratingFeedback, setIsGeneratingFeedback] = useState(false);
   const [isCompressingImage, setIsCompressingImage] = useState(false);
@@ -180,6 +182,52 @@ export default function StudentPlay() {
     }
   };
 
+  // 파일 선택 핸들러
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) {
+      setSelectedFile(null);
+      setSelectedImage(null);
+      setImagePreview(null);
+      return;
+    }
+
+    // 원본 파일 저장
+    setSelectedFile(file);
+    setIsCompressingImage(true);
+
+    try {
+      // 이미지 압축 옵션
+      const options = {
+        maxSizeMB: 0.2, // 최대 200KB
+        maxWidthOrHeight: 800, // 최대 800px
+        useWebWorker: true
+      };
+      
+      const compressedFile = await imageCompression(file, options);
+      setSelectedImage(compressedFile);
+      
+      // 미리보기 생성
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result);
+        setIsCompressingImage(false);
+      };
+      reader.readAsDataURL(compressedFile);
+    } catch (error) {
+      console.error('이미지 압축 오류:', error);
+      alert('이미지 압축에 실패했습니다. 원본 파일을 사용합니다.');
+      // 압축 실패 시 원본 파일 사용
+      setSelectedImage(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result);
+        setIsCompressingImage(false);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   // 정답 제출
   const handleSubmit = async () => {
     // 1. 퇴출된 학생인지 확인 (가장 먼저 검사 - 함수 시작 즉시, 이름이 없어도 체크)
@@ -197,7 +245,7 @@ export default function StudentPlay() {
     }
 
     // 제출 중이거나, 이미 완료되었거나, 답안이 비어있거나, 마지막 제출한 답안과 같으면 제출 불가
-    if (!question || !team || statusMessage || isCompleted || !userAnswer.trim()) {
+    if (!question || !team || statusMessage || isCompleted || !userAnswer.trim() || uploading) {
       return;
     }
 
@@ -205,6 +253,10 @@ export default function StudentPlay() {
     if (lastSubmittedAnswer === userAnswer.trim()) {
       return;
     }
+
+    // 로딩 시작
+    setUploading(true);
+    setStatusMessage('업로드 및 분석 중...');
 
     const isCorrect = checkAnswer(userAnswer, question.answer);
     let imageUrl = null;
@@ -221,45 +273,29 @@ export default function StudentPlay() {
       const activityRef = doc(db, 'activities', activityId);
       const teamRef = doc(activityRef, 'teams', teamId);
 
-      // 사진이 있으면 업로드 처리 (이미 파일 선택 시 압축 완료됨)
+      // (3) 이미지 업로드 (핵심)
       if (selectedImage) {
         try {
-          // 1단계: 이미지 압축 완료 표시 (이미 압축된 파일이지만 사용자에게 알림)
-          setStatusMessage('📸 사진 줄이는 중...');
-          // 이미 압축된 파일이므로 짧은 대기 후 바로 다음 단계로
-          await new Promise(resolve => setTimeout(resolve, 300));
-
-          // 2단계: Firebase Storage 업로드
           setStatusMessage('☁️ 서버에 올리는 중...');
           
-          try {
-            // 업로드 경로 단순화
-            const imageRef = ref(storage, `submissions/${activityId}/${Date.now()}_${selectedImage.name}`);
-            
-            // 업로드 실행
-            await uploadBytes(imageRef, selectedImage);
-            
-            // 다운로드 URL 가져오기
-            imageUrl = await getDownloadURL(imageRef);
-            console.log('이미지 업로드 성공:', imageUrl);
-          } catch (uploadError) {
-            console.error('이미지 업로드 오류 상세:', uploadError);
-            const errorMessage = uploadError.message || '알 수 없는 오류';
-            alert(`이미지 업로드 실패: ${errorMessage}\n잠시 후 다시 시도해주세요.`);
-            setStatusMessage('');
-            return;
-          }
-        } catch (error) {
-          if (error.message === '타임아웃') {
-            alert('시간이 너무 오래 걸립니다. 다시 시도해주세요.');
-            setStatusMessage('');
-            return;
-          }
-          console.error('이미지 처리 오류:', error);
-          alert(`이미지 처리 오류: ${error.message || '알 수 없는 오류'}\n잠시 후 다시 시도해주세요.`);
+          // Firebase Storage에 업로드
+          const storageRef = ref(storage, `solutions/${activityId}/${Date.now()}_${selectedImage.name}`);
+          await uploadBytes(storageRef, selectedImage);
+          
+          // 다운로드 URL 가져오기
+          imageUrl = await getDownloadURL(storageRef);
+          console.log('이미지 업로드 성공:', imageUrl);
+        } catch (uploadError) {
+          console.error('이미지 업로드 오류 상세:', uploadError);
+          const errorMessage = uploadError.message || '알 수 없는 오류';
+          alert(`이미지 업로드 실패: ${errorMessage}\n잠시 후 다시 시도해주세요.`);
           setStatusMessage('');
+          setUploading(false);
           return;
         }
+      } else {
+        // 파일이 없다면 imageUrl은 null
+        imageUrl = null;
       }
 
       if (isCorrect) {
@@ -350,40 +386,41 @@ export default function StudentPlay() {
             ? '학생이 정답을 맞췄으니 칭찬하는 톤으로 답변해줘.'
             : '학생이 틀렸으니 격려하고 힌트를 주는 톤으로 답변해줘.';
           
-          const systemMessage = `너는 친절한 초중고 수학 선생님이야. 학생의 풀이를 보고 50자~100자 이내로 짧고 명확하게 피드백해줘. ${isCorrectMessage} ${educationalContext ? `educationalContext(교과서 내용): ${educationalContext} 이걸 바탕으로 설명해줘.` : ''}`;
+          // 시스템 프롬프트 강화
+          const systemMessage = `너는 친절한 초중고 수학 선생님이야. 학생의 풀이를 보고 50자~100자 이내로 짧고 명확하게 피드백해줘. ${isCorrectMessage} ${educationalContext ? `educationalContext(교과서 내용): ${educationalContext} 이걸 바탕으로 설명해줘.` : ''} 학생이 이미지를 올렸다면, 이미지 속의 수식이나 풀이 과정을 꼼꼼히 읽고 피드백해줘. 정답 여부와 관계없이 칭찬과 보완할 점을 100자 내외로 말해줘.`;
 
-          // 메시지 구성: 이미지가 있는 경우와 없는 경우를 명확히 구분
-          let userMessage;
+          // AI 메시지 구성 로직 전면 수정
+          // content 배열을 빈 배열로 시작
+          const contentArray = [];
           
+          // 1. 텍스트 풀이 추가
+          const textContent = studentSolution.trim() 
+            ? `문제: ${question.questionText}\n\n학생 풀이: ${studentSolution.trim()}`
+            : imageUrl 
+              ? `문제: ${question.questionText}\n\n학생이 사진으로 풀이를 제출했습니다.`
+              : `문제: ${question.questionText}\n\n학생 풀이: (텍스트 없음)`;
+          
+          // 텍스트 풀이를 content 배열에 push
+          contentArray.push({
+            type: 'text',
+            text: textContent
+          });
+          
+          // 2. 이미지 풀이 추가 (imageUrl이 존재하는 경우만)
           if (imageUrl) {
-            // 이미지가 있는 경우: content를 배열로 구성 (text + image_url)
-            const textContent = studentSolution.trim() 
-              ? `문제: ${question.questionText}\n\n학생 풀이: ${studentSolution.trim()}`
-              : `문제: ${question.questionText}\n\n학생이 사진으로 풀이를 제출했습니다.`;
-            
-            userMessage = {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: textContent
-                },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: imageUrl // Firebase Storage에서 받은 downloadURL만 사용
-                  }
-                }
-              ]
-            };
-          } else {
-            // 이미지가 없는 경우: content를 단순 문자열로
-            const textContent = `문제: ${question.questionText}\n\n학생 풀이: ${studentSolution.trim()}`;
-            userMessage = {
-              role: 'user',
-              content: textContent
-            };
+            contentArray.push({
+              type: 'image_url',
+              image_url: {
+                url: imageUrl // Firebase Storage에서 받은 downloadURL만 사용
+              }
+            });
           }
+          
+          // 3. 완성된 content 배열을 user 메시지로 전송
+          const userMessage = {
+            role: 'user',
+            content: contentArray
+          };
 
           const messages = [
             {
@@ -393,6 +430,8 @@ export default function StudentPlay() {
             userMessage
           ];
 
+          // 디버깅: AI에게 보낼 데이터 확인
+          console.log('AI에게 보낼 데이터:', JSON.stringify(messages, null, 2));
           console.log('AI 호출 시작...', { model: 'gpt-4o', messagesCount: messages.length });
           
           // OpenAI 호출 (강화된 try-catch)
@@ -403,15 +442,21 @@ export default function StudentPlay() {
           });
 
           const completion = await Promise.race([aiPromise, timeoutPromise]);
-          console.log('AI 응답 받음:', completion);
           
-          const feedback = completion.choices[0]?.message?.content;
-          if (!feedback) {
-            throw new Error('AI 피드백 내용이 없습니다.');
+          // 디버깅: OpenAI 전체 응답 확인
+          console.log('OpenAI 전체 응답:', completion);
+          
+          // 응답 추출 로직 안전하게 수정
+          const aiContent = completion.choices?.[0]?.message?.content;
+          
+          if (!aiContent) {
+            console.error('AI 응답 내용 없음. 전체 응답:', completion);
+            // 에러를 throw하지 않고 기본 문구를 설정
+            setAiFeedback('AI 피드백을 불러오지 못했습니다. (잠시 후 다시 시도해주세요)');
+          } else {
+            console.log('AI 피드백:', aiContent);
+            setAiFeedback(aiContent);
           }
-          
-          console.log('AI 피드백:', feedback);
-          setAiFeedback(feedback);
           
           // 제출 직후 이미지 URL 저장 (화면 표시용)
           if (imageUrl) {
@@ -426,9 +471,10 @@ export default function StudentPlay() {
             teamId: teamId,
             questionId: questionId,
             questionText: question.questionText,
+            userAnswer: userAnswer.trim(), // 단답형 정답 추가
             studentSolution: studentSolution.trim() || '',
             imageUrl: imageUrl || null,
-            aiFeedback: feedback,
+            aiFeedback: aiContent || 'AI 피드백을 불러오지 못했습니다.',
             submittedAt: new Date(),
             isCorrect: isCorrect
           });
@@ -438,13 +484,14 @@ export default function StudentPlay() {
             alert('시간이 너무 오래 걸립니다. 다시 시도해주세요.');
             setStatusMessage('');
             setIsGeneratingFeedback(false);
+            setUploading(false);
             return;
           }
           
           // 상세한 에러 로깅 및 사용자 알림
           console.error('AI 피드백 생성 오류 전체:', feedbackError);
           const errorMessage = feedbackError.message || '알 수 없는 오류';
-          alert(`AI 오류 발생: ${errorMessage}`);
+          alert(`AI 피드백 오류: ${errorMessage}`);
           
           // 피드백 생성 실패해도 기본 정보는 저장 (teamName 포함)
           try {
@@ -482,6 +529,7 @@ export default function StudentPlay() {
             teamId: teamId,
             questionId: questionId,
             questionText: question.questionText,
+            userAnswer: userAnswer.trim(), // 단답형 정답 추가
             studentSolution: studentSolution.trim() || '',
             imageUrl: imageUrl || null,
             aiFeedback: null,
@@ -499,9 +547,10 @@ export default function StudentPlay() {
         setSavedImageUrl(imageUrl);
       }
 
-      // 4단계: 완료
+      // (6) 마무리: 완료 처리
       setStatusMessage('완료!');
       setIsGeneratingFeedback(false);
+      setUploading(false);
       
       // 완료 메시지를 잠깐 보여준 후 초기화
       setTimeout(() => {
@@ -517,6 +566,7 @@ export default function StudentPlay() {
       }
       setStatusMessage('');
       setIsGeneratingFeedback(false);
+      setUploading(false);
     } finally {
       // 타임아웃 타이머 정리
       if (timeoutId) {
@@ -678,47 +728,8 @@ export default function StudentPlay() {
                 <input
                   type="file"
                   accept="image/*"
-                  onChange={async (e) => {
-                    const file = e.target.files[0];
-                    if (file) {
-                      setIsCompressingImage(true);
-                      try {
-                        // 이미지 압축 옵션 (아주 강력하게)
-                        const options = {
-                          maxSizeMB: 0.2, // 최대 용량 200KB
-                          maxWidthOrHeight: 800, // 최대 해상도 800px
-                          useWebWorker: true,
-                          fileType: file.type
-                        };
-
-                        // 이미지 압축
-                        const compressedFile = await imageCompression(file, options);
-                        
-                        // 압축된 파일을 state에 저장
-                        setSelectedImage(compressedFile);
-                        
-                        // 미리보기 생성
-                        const reader = new FileReader();
-                        reader.onloadend = () => {
-                          setImagePreview(reader.result);
-                          setIsCompressingImage(false);
-                        };
-                        reader.readAsDataURL(compressedFile);
-                      } catch (error) {
-                        console.error('이미지 압축 오류:', error);
-                        alert('이미지 압축에 실패했습니다. 원본 파일을 사용합니다.');
-                        // 압축 실패 시 원본 파일 사용
-                        setSelectedImage(file);
-                        const reader = new FileReader();
-                        reader.onloadend = () => {
-                          setImagePreview(reader.result);
-                          setIsCompressingImage(false);
-                        };
-                        reader.readAsDataURL(file);
-                      }
-                    }
-                  }}
-                  disabled={isCompressingImage}
+                  onChange={handleFileChange}
+                  disabled={isCompressingImage || uploading}
                   className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
                 />
                 {isCompressingImage && (
@@ -729,10 +740,11 @@ export default function StudentPlay() {
                     <img
                       src={imagePreview}
                       alt="미리보기"
-                      className="max-w-full h-auto rounded-lg border border-gray-300"
+                      className="max-w-full h-auto max-h-64 rounded-lg border border-gray-300 object-contain"
                     />
                     <button
                       onClick={() => {
+                        setSelectedFile(null);
                         setSelectedImage(null);
                         setImagePreview(null);
                         // 파일 input 초기화
@@ -751,31 +763,31 @@ export default function StudentPlay() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   정답 입력
                 </label>
-                <input
-                  type="text"
-                  value={userAnswer}
-                  onChange={(e) => setUserAnswer(e.target.value)}
-                  placeholder="답안을 입력하세요"
+              <input
+                type="text"
+                value={userAnswer}
+                onChange={(e) => setUserAnswer(e.target.value)}
+                placeholder="답안을 입력하세요"
                   disabled={!!statusMessage}
-                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter' && canSubmit) {
-                      handleSubmit();
-                    }
-                  }}
-                />
+                className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-lg disabled:bg-gray-100 disabled:cursor-not-allowed"
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && canSubmit) {
+                    handleSubmit();
+                  }
+                }}
+              />
               </div>
               
               <button
                 onClick={handleSubmit}
-                disabled={!canSubmit || !studentName.trim() || !!statusMessage}
+                disabled={!canSubmit || !studentName.trim() || !!statusMessage || uploading}
                 className={`w-full text-white font-semibold py-3 rounded-lg transition-colors text-lg ${
-                  canSubmit && studentName.trim() && !statusMessage
+                  canSubmit && studentName.trim() && !statusMessage && !uploading
                     ? 'bg-blue-600 hover:bg-blue-700 cursor-pointer'
                     : 'bg-gray-400 cursor-not-allowed'
                 }`}
               >
-                {statusMessage || '제출하기'}
+                {uploading ? '업로드 및 분석 중...' : (statusMessage || '제출하기')}
               </button>
               {lastSubmittedAnswer && userAnswer.trim() === lastSubmittedAnswer && (
                 <p className="text-sm text-gray-500 text-center">

@@ -1,9 +1,8 @@
 // firebase.js
-import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
-import { getStorage } from 'firebase/storage';
+import { initializeApp } from "firebase/app";
+import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage"; // ★ 이 줄 필수!
 
-// 여기에 Firebase 콘솔 설정값 붙여넣기
 const firebaseConfig = {
   apiKey: "AIzaSyAJfkcQOx7nJWvjPBZ4-Hm4Ddz-vFS6QM8",
   authDomain: "mafia-c8e92.firebaseapp.com",
@@ -13,12 +12,8 @@ const firebaseConfig = {
   appId: "1:471373151872:web:246f8bc2b3a8627cf33065"
 };
 
-// Firebase 초기화
 const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const storage = getStorage(app); // ★ 이 줄 필수!
 
-// Firestore 인스턴스 생성 및 export
-export const db = getFirestore(app);
-
-// Storage 인스턴스 생성 및 export
-export const storage = getStorage(app);
-
+export { db, storage }; // ★ storage도 꼭 export 해야 합니다!
