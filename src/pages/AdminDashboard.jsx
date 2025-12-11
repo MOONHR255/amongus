@@ -45,6 +45,14 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('questions'); // 'questions', 'monitoring', 'statistics'
   const [selectedStudentStat, setSelectedStudentStat] = useState(null); // { studentName: string, type: 'correct' | 'incorrect' }
   const [isModalOpen, setIsModalOpen] = useState(false);
+  
+  // 보안 경보 시스템 상태
+  const [alertThreshold, setAlertThreshold] = useState(-5); // 기준 점수
+  const [showSecurityAlert, setShowSecurityAlert] = useState(false); // 경보 배너 표시 여부
+  
+  // 문항별 분석 상태
+  const [statisticsSubTab, setStatisticsSubTab] = useState('students'); // 'students' | 'questions'
+  const [questionAnalysisSortOrder, setQuestionAnalysisSortOrder] = useState('asc'); // 'asc' (낮은 순) | 'desc' (높은 순)
 
   // 로그인 처리
   const handleLogin = (e) => {
@@ -496,6 +504,26 @@ export default function AdminDashboard() {
     return () => unsubscribe();
   }, []);
 
+  // 조커 팀 점수 합계 계산 및 경보 감지
+  useEffect(() => {
+    if (!selectedActivity) {
+      setShowSecurityAlert(false);
+      return;
+    }
+
+    // 조커 팀의 점수 합계 계산
+    const jokerTeams = teams.filter(team => team.type === 'joker');
+    const totalJokerScore = jokerTeams.reduce((sum, team) => sum + (team.score || 0), 0);
+
+    // 기준 점수 이하일 때 경보 표시
+    if (totalJokerScore <= alertThreshold) {
+      setShowSecurityAlert(true);
+    } else {
+      // 기준 점수보다 높아지면 경보는 자동으로 사라지지 않음 (확인 버튼으로만 닫기)
+      // setShowSecurityAlert(false);
+    }
+  }, [teams, alertThreshold, selectedActivity]);
+
   // 로그인 화면
   if (!isAuthenticated) {
     return (
@@ -523,7 +551,27 @@ export default function AdminDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 p-6">
+    <div className={`min-h-screen bg-gray-100 p-6 ${showSecurityAlert && selectedActivity ? 'pt-24' : ''}`}>
+      {/* 보안 경보 배너 */}
+      {showSecurityAlert && selectedActivity && (
+        <div className="fixed top-0 left-0 right-0 z-[60] bg-red-600 text-white px-6 py-4 shadow-lg">
+          <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="w-6 h-6 animate-pulse" />
+              <p className="text-lg font-semibold">
+                🚨 보안 시스템 작동! 누군가가 우주선을 망가트리고 있습니다. 그 사람에 대한 정보가 제공됩니다.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowSecurityAlert(false)}
+              className="px-4 py-2 bg-white text-red-600 font-semibold rounded-lg hover:bg-gray-100 transition-colors"
+            >
+              확인
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 알림 표시 (30초 동안만 표시, 선택된 활동의 알림만) */}
       {selectedActivity && activeNotifications.length > 0 && (
         <div className="fixed top-4 right-4 z-50 space-y-2">
@@ -936,6 +984,33 @@ export default function AdminDashboard() {
 
             {activeTab === 'monitoring' && (
               <div className="space-y-6">
+                {/* 보안 경보 기준 점수 설정 */}
+                <div className="bg-white rounded-lg shadow-md p-6">
+                  <h2 className="text-2xl font-semibold text-gray-700 mb-4">보안 경보 시스템 설정</h2>
+                  <div className="flex items-center gap-4">
+                    <label className="text-gray-700 font-medium">
+                      조커 팀 경보 기준 점수:
+                    </label>
+                    <input
+                      type="number"
+                      value={alertThreshold}
+                      onChange={(e) => setAlertThreshold(parseInt(e.target.value) || -5)}
+                      className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 w-32"
+                      placeholder="-5"
+                    />
+                    <span className="text-gray-600 text-sm">
+                      (조커 팀 점수 합계가 이 값 이하일 때 경보가 작동합니다)
+                    </span>
+                  </div>
+                  <div className="mt-4 p-3 bg-blue-50 rounded-lg">
+                    <p className="text-sm text-gray-700">
+                      현재 조커 팀 점수 합계: <span className="font-bold text-blue-600">
+                        {teams.filter(team => team.type === 'joker').reduce((sum, team) => sum + (team.score || 0), 0)}점
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
                 {/* 리더보드 */}
                 <div className="bg-white rounded-lg shadow-md p-6">
                   <h2 className="text-2xl font-semibold text-gray-700 mb-4">리더보드</h2>
@@ -1120,7 +1195,35 @@ export default function AdminDashboard() {
 
             {activeTab === 'statistics' && (
               <div className="bg-white rounded-lg shadow-md p-6">
-                <h2 className="text-2xl font-semibold text-gray-700 mb-4">학생 통계</h2>
+                {/* 통계 서브 탭 메뉴 */}
+                <div className="mb-6 border-b border-gray-200">
+                  <div className="flex gap-4">
+                    <button
+                      onClick={() => setStatisticsSubTab('students')}
+                      className={`px-6 py-3 font-semibold transition-colors ${
+                        statisticsSubTab === 'students'
+                          ? 'text-blue-600 border-b-2 border-blue-600'
+                          : 'text-gray-600 hover:text-gray-800'
+                      }`}
+                    >
+                      학생별 통계
+                    </button>
+                    <button
+                      onClick={() => setStatisticsSubTab('questions')}
+                      className={`px-6 py-3 font-semibold transition-colors ${
+                        statisticsSubTab === 'questions'
+                          ? 'text-blue-600 border-b-2 border-blue-600'
+                          : 'text-gray-600 hover:text-gray-800'
+                      }`}
+                    >
+                      문항별 분석
+                    </button>
+                  </div>
+                </div>
+
+                {statisticsSubTab === 'students' && (
+                  <>
+                    <h2 className="text-2xl font-semibold text-gray-700 mb-4">학생 통계</h2>
                 {(() => {
                   // 현재 선택된 활동의 submissions만 필터링
                   const activitySubmissions = submissions.filter(sub => 
@@ -1223,6 +1326,130 @@ export default function AdminDashboard() {
                     </div>
                   );
                 })()}
+                  </>
+                )}
+
+                {statisticsSubTab === 'questions' && (
+                  <div>
+                    <h2 className="text-2xl font-semibold text-gray-700 mb-4">문항별 분석</h2>
+                    {(() => {
+                      // 현재 선택된 활동의 submissions만 필터링
+                      const activitySubmissions = submissions.filter(sub => 
+                        sub?.activityId === selectedActivity
+                      );
+                      
+                      if (activitySubmissions.length === 0) {
+                        return <p className="text-gray-500 text-center py-8">아직 제출된 답변이 없습니다.</p>;
+                      }
+
+                      // 모든 문제 정보 수집
+                      const allQuestions = teams.flatMap(team => 
+                        (questions[team.id] || []).map(q => ({
+                          ...q,
+                          teamName: team.name,
+                          teamId: team.id
+                        }))
+                      );
+
+                      // 문제별 통계 계산
+                      const questionStats = allQuestions.map(question => {
+                        const questionId = question.questionId || question.id;
+                        const questionSubmissions = activitySubmissions.filter(sub => 
+                          sub?.questionId === questionId
+                        );
+                        
+                        const totalAttempts = questionSubmissions.length;
+                        const correctAttempts = questionSubmissions.filter(sub => sub?.isCorrect === true).length;
+                        const incorrectAttempts = totalAttempts - correctAttempts;
+                        const accuracy = totalAttempts > 0 
+                          ? ((correctAttempts / totalAttempts) * 100).toFixed(1) 
+                          : '0.0';
+                        
+                        return {
+                          questionId,
+                          questionText: question.questionText || '알 수 없음',
+                          teamName: question.teamName || '알 수 없음',
+                          totalAttempts,
+                          correctAttempts,
+                          incorrectAttempts,
+                          accuracy: parseFloat(accuracy)
+                        };
+                      }).filter(stat => stat.totalAttempts > 0); // 시도가 있는 문제만 표시
+
+                      // 정답률 기준 정렬
+                      const sortedStats = [...questionStats].sort((a, b) => {
+                        if (questionAnalysisSortOrder === 'asc') {
+                          return a.accuracy - b.accuracy; // 낮은 순 (어려운 문제 순)
+                        } else {
+                          return b.accuracy - a.accuracy; // 높은 순
+                        }
+                      });
+
+                      return (
+                        <div className="overflow-x-auto">
+                          <table className="w-full border-collapse">
+                            <thead>
+                              <tr className="bg-gray-100 border-b-2 border-gray-300">
+                                <th className="px-4 py-3 text-left font-semibold text-gray-700">순위</th>
+                                <th className="px-4 py-3 text-left font-semibold text-gray-700">문제 내용</th>
+                                <th className="px-4 py-3 text-center font-semibold text-gray-700">시도 횟수</th>
+                                <th className="px-4 py-3 text-center font-semibold text-gray-700">정답/오답</th>
+                                <th 
+                                  className="px-4 py-3 text-center font-semibold text-gray-700 cursor-pointer hover:bg-gray-200 transition-colors"
+                                  onClick={() => setQuestionAnalysisSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}
+                                >
+                                  정답률 {questionAnalysisSortOrder === 'asc' ? '↑' : '↓'}
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sortedStats.map((stat, index) => (
+                                <tr
+                                  key={stat.questionId}
+                                  className={`border-b border-gray-200 hover:bg-gray-50 transition-colors ${
+                                    stat.accuracy < 30 ? 'bg-red-50' : ''
+                                  }`}
+                                >
+                                  <td className="px-4 py-3 text-gray-700 font-medium">
+                                    {index + 1}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div>
+                                      <p className="font-medium text-gray-800 line-clamp-2">
+                                        {stat.questionText}
+                                      </p>
+                                      <p className="text-xs text-gray-500 mt-1">
+                                        ({stat.teamName})
+                                      </p>
+                                    </div>
+                                  </td>
+                                  <td className="px-4 py-3 text-center text-gray-700">
+                                    {stat.totalAttempts}회
+                                  </td>
+                                  <td className="px-4 py-3 text-center">
+                                    <span className="text-green-600 font-semibold">{stat.correctAttempts}</span>
+                                    <span className="text-gray-400 mx-1">/</span>
+                                    <span className="text-red-600 font-semibold">{stat.incorrectAttempts}</span>
+                                  </td>
+                                  <td className={`px-4 py-3 text-center font-semibold ${
+                                    stat.accuracy < 30 ? 'text-red-600' :
+                                    stat.accuracy < 50 ? 'text-yellow-600' :
+                                    'text-green-600'
+                                  }`}>
+                                    {stat.accuracy}%
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {sortedStats.length === 0 && (
+                            <p className="text-gray-500 text-center py-8">분석할 데이터가 없습니다.</p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
               </div>
             )}
           </>
