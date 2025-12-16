@@ -5,14 +5,16 @@ import {
   collection, 
   doc, 
   addDoc, 
-  getDocs, 
+  getDocs,
+  getDoc,
   deleteDoc, 
   updateDoc,
   onSnapshot,
   query,
   orderBy,
   increment,
-  writeBatch
+  writeBatch,
+  where
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import imageCompression from 'browser-image-compression';
