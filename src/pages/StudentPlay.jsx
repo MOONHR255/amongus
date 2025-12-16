@@ -60,23 +60,31 @@ export default function StudentPlay() {
 
   // 문제 및 팀 정보 로드 (고유번호 검증 후에만 실행)
   useEffect(() => {
-    const loadData = async () => {
-      // 고유번호가 검증되지 않았으면 문제를 로드하지 않음
-      if (!isAccessCodeVerified || !verifiedTeamId) {
-        return;
-      }
+    // 필수 파라미터 확인
+    if (!activityId || !questionId) {
+      return;
+    }
 
+    // 고유번호가 검증되지 않았으면 문제를 로드하지 않음
+    if (!isAccessCodeVerified || !verifiedTeamId) {
+      return;
+    }
+
+    const loadData = async () => {
       try {
         // 검증된 팀 ID를 사용하여 팀 정보 로드
         const activityRef = doc(db, 'activities', activityId);
         const teamRef = doc(activityRef, 'teams', verifiedTeamId);
         const teamSnap = await getDoc(teamRef);
         
-        if (teamSnap.exists()) {
-          const teamData = { id: teamSnap.id, ...teamSnap.data() };
-          setTeam(teamData);
-          setCurrentScore(teamData.score || 0);
+        if (!teamSnap.exists()) {
+          alert('팀 정보를 찾을 수 없습니다.');
+          return;
         }
+
+        const teamData = { id: teamSnap.id, ...teamSnap.data() };
+        setTeam(teamData);
+        setCurrentScore(teamData.score || 0);
 
         // 문제 정보 로드 (검증된 팀 ID 사용)
         const questionsSnapshot = await getDocs(collection(teamRef, 'questions'));
@@ -84,64 +92,63 @@ export default function StudentPlay() {
           (qDoc) => qDoc.data().questionId === questionId || qDoc.id === questionId
         );
         
-        if (foundQuestion) {
-          const questionData = { id: foundQuestion.id, ...foundQuestion.data() };
-          setQuestion(questionData);
-          
-          // 이미 완료된 문제인지 확인
-          if (questionData.completed) {
-            setIsCompleted(true);
-            setIsSubmitted(true);
-          }
-          
-          // 이전 제출 내용 복구 (submissions 컬렉션에서 최신 기록 가져오기)
-          // 주의: 학생 이름은 복구하지 않음 (새 문제마다 빈 칸으로 시작)
-          try {
-            const submissionsQuery = query(
-              collection(db, 'submissions'),
-              where('activityId', '==', activityId),
-              where('teamId', '==', verifiedTeamId),
-              where('questionId', '==', questionId),
-              orderBy('submittedAt', 'desc'),
-              limit(1)
-            );
-            
-            const submissionsSnapshot = await getDocs(submissionsQuery);
-            if (!submissionsSnapshot.empty) {
-              const latestSubmission = submissionsSnapshot.docs[0].data();
-              
-              // 상태 복구 (학생 이름 제외)
-              // 학생 이름은 복구하지 않음 - 새 문제마다 빈 칸으로 시작
-              
-              if (latestSubmission.studentSolution) {
-                setStudentSolution(latestSubmission.studentSolution);
-              }
-              
-              if (latestSubmission.aiFeedback) {
-                setAiFeedback(latestSubmission.aiFeedback);
-              }
-              
-              if (latestSubmission.imageUrl) {
-                setSavedImageUrl(latestSubmission.imageUrl);
-                setImagePreview(latestSubmission.imageUrl);
-              }
-              
-              // 정답 여부 확인하여 완료 상태 복구
-              if (latestSubmission.isCorrect) {
-                setIsCompleted(true);
-                setIsSubmitted(true);
-                setResult({ type: 'success', message: `미션 완료! +${questionData.score || 0}점!` });
-              } else {
-                // 오답인 경우 제출 상태만 복구 (재시도 가능)
-                setIsSubmitted(true);
-              }
-            }
-          } catch (submissionError) {
-            console.error('제출 내용 복구 오류:', submissionError);
-            // 제출 내용 복구 실패해도 계속 진행
-          }
-        } else {
+        if (!foundQuestion) {
           alert('문제를 찾을 수 없습니다.');
+          return;
+        }
+
+        const questionData = { id: foundQuestion.id, ...foundQuestion.data() };
+        setQuestion(questionData);
+        
+        // 이미 완료된 문제인지 확인
+        if (questionData.completed) {
+          setIsCompleted(true);
+          setIsSubmitted(true);
+        }
+        
+        // 이전 제출 내용 복구 (submissions 컬렉션에서 최신 기록 가져오기)
+        // 주의: 학생 이름은 복구하지 않음 (새 문제마다 빈 칸으로 시작)
+        try {
+          const submissionsQuery = query(
+            collection(db, 'submissions'),
+            where('activityId', '==', activityId),
+            where('teamId', '==', verifiedTeamId),
+            where('questionId', '==', questionId),
+            orderBy('submittedAt', 'desc'),
+            limit(1)
+          );
+          
+          const submissionsSnapshot = await getDocs(submissionsQuery);
+          if (!submissionsSnapshot.empty) {
+            const latestSubmission = submissionsSnapshot.docs[0].data();
+            
+            // 상태 복구 (학생 이름 제외)
+            if (latestSubmission.studentSolution) {
+              setStudentSolution(latestSubmission.studentSolution);
+            }
+            
+            if (latestSubmission.aiFeedback) {
+              setAiFeedback(latestSubmission.aiFeedback);
+            }
+            
+            if (latestSubmission.imageUrl) {
+              setSavedImageUrl(latestSubmission.imageUrl);
+              setImagePreview(latestSubmission.imageUrl);
+            }
+            
+            // 정답 여부 확인하여 완료 상태 복구
+            if (latestSubmission.isCorrect) {
+              setIsCompleted(true);
+              setIsSubmitted(true);
+              setResult({ type: 'success', message: `미션 완료! +${questionData.score || 0}점!` });
+            } else {
+              // 오답인 경우 제출 상태만 복구 (재시도 가능)
+              setIsSubmitted(true);
+            }
+          }
+        } catch (submissionError) {
+          console.error('제출 내용 복구 오류:', submissionError);
+          // 제출 내용 복구 실패해도 계속 진행
         }
       } catch (error) {
         console.error('데이터 로드 오류:', error);
@@ -149,9 +156,7 @@ export default function StudentPlay() {
       }
     };
 
-    if (activityId && questionId && isAccessCodeVerified && verifiedTeamId) {
-      loadData();
-    }
+    loadData();
   }, [activityId, questionId, isAccessCodeVerified, verifiedTeamId]);
 
   // 고유번호 검증 함수 (재사용 가능)
@@ -160,8 +165,15 @@ export default function StudentPlay() {
       setAccessCodeError('3자리 숫자를 입력해주세요.');
       return false;
     }
+
+    if (!activityId) {
+      setAccessCodeError('활동 정보를 찾을 수 없습니다.');
+      return false;
+    }
     
     try {
+      setAccessCodeError(''); // 에러 메시지 초기화
+      
       const activityRef = doc(db, 'activities', activityId);
       
       // 모든 팀의 access_codes 검색 (is_used 체크 제거 - 재사용 가능)
@@ -186,9 +198,8 @@ export default function StudentPlay() {
           setIsAccessCodeVerified(true);
           setAccessCodeError('');
           
-          // 팀 정보 업데이트 (문제 로드는 useEffect에서 자동으로 처리됨)
-          setTeam({ id: teamDoc.id, ...teamData });
-          setCurrentScore(teamData.score || 0);
+          // 팀 정보는 useEffect에서 로드되므로 여기서는 상태만 설정
+          // 문제 로드는 useEffect에서 자동으로 처리됨
           
           return true;
         }
