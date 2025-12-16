@@ -58,13 +58,18 @@ export default function StudentPlay() {
 
   // 학생 이름은 localStorage에 저장하지 않음 (매번 빈 칸으로 시작)
 
-  // 문제 및 팀 정보 로드 및 제출 내용 복구
+  // 문제 및 팀 정보 로드 (고유번호 검증 후에만 실행)
   useEffect(() => {
     const loadData = async () => {
+      // 고유번호가 검증되지 않았으면 문제를 로드하지 않음
+      if (!isAccessCodeVerified || !verifiedTeamId) {
+        return;
+      }
+
       try {
-        // 팀 정보 로드
+        // 검증된 팀 ID를 사용하여 팀 정보 로드
         const activityRef = doc(db, 'activities', activityId);
-        const teamRef = doc(activityRef, 'teams', teamId);
+        const teamRef = doc(activityRef, 'teams', verifiedTeamId);
         const teamSnap = await getDoc(teamRef);
         
         if (teamSnap.exists()) {
@@ -73,7 +78,7 @@ export default function StudentPlay() {
           setCurrentScore(teamData.score || 0);
         }
 
-        // 문제 정보 로드
+        // 문제 정보 로드 (검증된 팀 ID 사용)
         const questionsSnapshot = await getDocs(collection(teamRef, 'questions'));
         const foundQuestion = questionsSnapshot.docs.find(
           (qDoc) => qDoc.data().questionId === questionId || qDoc.id === questionId
@@ -95,7 +100,7 @@ export default function StudentPlay() {
             const submissionsQuery = query(
               collection(db, 'submissions'),
               where('activityId', '==', activityId),
-              where('teamId', '==', teamId),
+              where('teamId', '==', verifiedTeamId),
               where('questionId', '==', questionId),
               orderBy('submittedAt', 'desc'),
               limit(1)
@@ -144,10 +149,10 @@ export default function StudentPlay() {
       }
     };
 
-    if (activityId && teamId && questionId) {
+    if (activityId && questionId && isAccessCodeVerified && verifiedTeamId) {
       loadData();
     }
-  }, [activityId, teamId, questionId]);
+  }, [activityId, questionId, isAccessCodeVerified, verifiedTeamId]);
 
   // 고유번호 검증 함수 (재사용 가능)
   const verifyAccessCode = async (code) => {
@@ -181,7 +186,7 @@ export default function StudentPlay() {
           setIsAccessCodeVerified(true);
           setAccessCodeError('');
           
-          // 팀 정보 업데이트
+          // 팀 정보 업데이트 (문제 로드는 useEffect에서 자동으로 처리됨)
           setTeam({ id: teamDoc.id, ...teamData });
           setCurrentScore(teamData.score || 0);
           
@@ -346,7 +351,7 @@ export default function StudentPlay() {
 
     try {
       const activityRef = doc(db, 'activities', activityId);
-      const teamRef = doc(activityRef, 'teams', teamId);
+      const teamRef = doc(activityRef, 'teams', verifiedTeamId); // 검증된 팀 ID 사용
 
       // (3) 이미지 업로드 (핵심)
       if (selectedImage) {
@@ -538,12 +543,12 @@ export default function StudentPlay() {
             setSavedImageUrl(imageUrl);
           }
 
-          // submissions 컬렉션에 저장 (teamName 포함)
+          // submissions 컬렉션에 저장 (teamName 포함, verifiedTeamId 사용)
           await addDoc(collection(db, 'submissions'), {
             studentName: studentName.trim(),
             teamName: team.name || '알 수 없음',
             activityId: activityId,
-            teamId: teamId,
+            teamId: verifiedTeamId, // 검증된 팀 ID 사용
             questionId: questionId,
             questionText: question.questionText,
             userAnswer: userAnswer.trim(), // 단답형 정답 추가
@@ -568,13 +573,13 @@ export default function StudentPlay() {
           const errorMessage = feedbackError.message || '알 수 없는 오류';
           alert(`AI 피드백 오류: ${errorMessage}`);
           
-          // 피드백 생성 실패해도 기본 정보는 저장 (teamName 포함)
+          // 피드백 생성 실패해도 기본 정보는 저장 (teamName 포함, verifiedTeamId 사용)
           try {
             await addDoc(collection(db, 'submissions'), {
               studentName: studentName.trim(),
               teamName: team.name || '알 수 없음',
               activityId: activityId,
-              teamId: teamId,
+              teamId: verifiedTeamId, // 검증된 팀 ID 사용
               questionId: questionId,
               questionText: question.questionText,
               studentSolution: studentSolution.trim() || '',
@@ -601,7 +606,7 @@ export default function StudentPlay() {
             studentName: studentName.trim(),
             teamName: team.name || '알 수 없음',
             activityId: activityId,
-            teamId: teamId,
+            teamId: verifiedTeamId, // 검증된 팀 ID 사용
             questionId: questionId,
             questionText: question.questionText,
             userAnswer: userAnswer.trim(), // 단답형 정답 추가
@@ -704,15 +709,7 @@ export default function StudentPlay() {
     }
   };
 
-  if (!question || !team) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
-        <div className="text-white text-xl">로딩 중...</div>
-      </div>
-    );
-  }
-
-  // 고유번호 입력 화면
+  // 고유번호 입력 화면 (먼저 체크)
   if (!isAccessCodeVerified) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center p-6">
@@ -753,6 +750,15 @@ export default function StudentPlay() {
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  // 문제와 팀 정보가 로드되지 않았으면 로딩 화면 표시
+  if (!question || !team) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
+        <div className="text-white text-xl">로딩 중...</div>
       </div>
     );
   }
