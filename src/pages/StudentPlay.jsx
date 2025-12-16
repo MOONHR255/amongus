@@ -48,6 +48,13 @@ export default function StudentPlay() {
   const [isGeneratingFeedback, setIsGeneratingFeedback] = useState(false);
   const [isCompressingImage, setIsCompressingImage] = useState(false);
   const [savedImageUrl, setSavedImageUrl] = useState(null); // 복구된 이미지 URL
+  
+  // 고유번호 관련 상태
+  const [accessCode, setAccessCode] = useState(''); // 입력한 고유번호
+  const [isAccessCodeVerified, setIsAccessCodeVerified] = useState(false); // 고유번호 검증 완료 여부
+  const [verifiedTeamId, setVerifiedTeamId] = useState(null); // 검증된 팀 ID
+  const [verifiedTeamName, setVerifiedTeamName] = useState(''); // 검증된 팀 이름
+  const [accessCodeError, setAccessCodeError] = useState(''); // 고유번호 오류 메시지
 
   // 학생 이름은 localStorage에 저장하지 않음 (매번 빈 칸으로 시작)
 
@@ -142,6 +149,56 @@ export default function StudentPlay() {
     }
   }, [activityId, teamId, questionId]);
 
+  // 고유번호 검증 함수 (재사용 가능)
+  const verifyAccessCode = async (code) => {
+    if (!code || code.length !== 3) {
+      setAccessCodeError('3자리 숫자를 입력해주세요.');
+      return false;
+    }
+    
+    try {
+      const activityRef = doc(db, 'activities', activityId);
+      
+      // 모든 팀의 access_codes 검색 (is_used 체크 제거 - 재사용 가능)
+      const teamsSnapshot = await getDocs(collection(activityRef, 'teams'));
+      
+      for (const teamDoc of teamsSnapshot.docs) {
+        const teamRef = doc(activityRef, 'teams', teamDoc.id);
+        const accessCodesSnapshot = await getDocs(
+          query(
+            collection(teamRef, 'access_codes'),
+            where('code', '==', code)
+          )
+        );
+        
+        if (!accessCodesSnapshot.empty) {
+          // 고유번호를 찾았음 (재사용 가능하므로 is_used 체크 없음)
+          const teamData = teamDoc.data();
+          
+          // 검증된 팀 정보 저장
+          setVerifiedTeamId(teamDoc.id);
+          setVerifiedTeamName(teamData.name);
+          setIsAccessCodeVerified(true);
+          setAccessCodeError('');
+          
+          // 팀 정보 업데이트
+          setTeam({ id: teamDoc.id, ...teamData });
+          setCurrentScore(teamData.score || 0);
+          
+          return true;
+        }
+      }
+      
+      // 고유번호를 찾지 못함
+      setAccessCodeError('유효하지 않은 고유번호입니다.');
+      return false;
+    } catch (error) {
+      console.error('고유번호 검증 오류:', error);
+      setAccessCodeError('고유번호 검증 중 오류가 발생했습니다.');
+      return false;
+    }
+  };
+
   // 퇴출된 학생 확인 함수
   const checkEliminated = async (name) => {
     try {
@@ -160,16 +217,22 @@ export default function StudentPlay() {
         if (notifData.text && notifData.text.includes('퇴출')) {
           // 알림 텍스트에서 학생 이름 추출 (정확한 패턴만 사용)
           const text = notifData.text;
+          let eliminatedName = '';
           
-          // "~ 학생이 퇴출되었습니다!" 패턴 (정확한 매칭만)
-          if (text.includes('학생이 퇴출되었습니다')) {
-            // "학생이 퇴출되었습니다" 앞의 텍스트를 정확히 추출
-            const eliminatedName = text.split(' 학생이 퇴출되었습니다')[0].trim();
-            // 정확한 이름 매칭 (부분 문자열이 아닌 완전 일치)
-            if (eliminatedName === normalizedName) {
-              console.log('퇴출 확인됨 (정확한 매칭):', normalizedName);
-              return true;
-            }
+          // 새로운 포맷: ['활동명'] 의 '사용자명' 퇴출
+          if (text.includes("'") && text.includes('퇴출')) {
+            const match = text.match(/'([^']+)' 퇴출/);
+            eliminatedName = match ? match[1].trim() : '';
+          }
+          // 기존 포맷: "~ 학생이 퇴출되었습니다!" (하위 호환성)
+          else if (text.includes('학생이 퇴출되었습니다')) {
+            eliminatedName = text.split(' 학생이 퇴출되었습니다')[0].trim();
+          }
+          
+          // 정확한 이름 매칭 (부분 문자열이 아닌 완전 일치)
+          if (eliminatedName === normalizedName) {
+            console.log('퇴출 확인됨 (정확한 매칭):', normalizedName);
+            return true;
           }
         }
       }
@@ -230,8 +293,20 @@ export default function StudentPlay() {
 
   // 정답 제출
   const handleSubmit = async () => {
-    // 1. 퇴출된 학생인지 확인 (가장 먼저 검사 - 함수 시작 즉시, 이름이 없어도 체크)
-    // 이름이 비어있으면 먼저 이름 입력 요청
+    // 1. 고유번호 검증 확인
+    if (!isAccessCodeVerified || !verifiedTeamId) {
+      alert('고유번호를 먼저 입력해주세요.');
+      return;
+    }
+    
+    // 2. 팀 검증 (정답 제출 시 엄격한 검증)
+    if (verifiedTeamId !== teamId) {
+      const teamName = team?.name || '알 수 없는 팀';
+      alert(`${teamName}이 아니므로 정답을 제출할 수 없습니다.`);
+      return;
+    }
+    
+    // 3. 퇴출된 학생인지 확인
     if (!studentName || !studentName.trim()) {
       alert('학생 이름을 입력해주세요.');
       return;
@@ -610,9 +685,13 @@ export default function StudentPlay() {
         });
       });
 
-      // 알림 추가 (activityId 포함)
+      // 활동 이름 가져오기
+      const activitySnap = await getDoc(doc(db, 'activities', activityId));
+      const activityName = activitySnap.exists() ? activitySnap.data().name : '활동';
+      
+      // 알림 추가 (activityId 및 활동 이름 포함)
       await addDoc(collection(db, 'notifications'), {
-        text: `${jokerStudentName} 학생이 퇴출되었습니다!`,
+        text: `['${activityName}'] 의 '${jokerStudentName}' 퇴출`,
         timestamp: new Date(),
         activityId: activityId
       });
@@ -633,6 +712,51 @@ export default function StudentPlay() {
     );
   }
 
+  // 고유번호 입력 화면
+  if (!isAccessCodeVerified) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center p-6">
+        <div className="bg-white rounded-lg shadow-2xl p-8 max-w-md w-full">
+          <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">고유번호 입력</h2>
+          <p className="text-gray-600 mb-4 text-center">관리자로부터 받은 3자리 고유번호를 입력하세요.</p>
+          <div className="space-y-4">
+            <input
+              type="text"
+              value={accessCode}
+              onChange={(e) => {
+                const value = e.target.value.replace(/\D/g, '').slice(0, 3);
+                setAccessCode(value);
+                setAccessCodeError('');
+              }}
+              placeholder="000"
+              maxLength={3}
+              className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-2xl text-center font-bold tracking-widest"
+              onKeyPress={(e) => {
+                if (e.key === 'Enter' && accessCode.length === 3) {
+                  verifyAccessCode(accessCode);
+                }
+              }}
+            />
+            {accessCodeError && (
+              <p className="text-red-600 text-sm text-center">{accessCodeError}</p>
+            )}
+            <button
+              onClick={() => verifyAccessCode(accessCode)}
+              disabled={accessCode.length !== 3}
+              className={`w-full py-3 rounded-lg font-semibold text-lg transition-colors ${
+                accessCode.length === 3
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
+            >
+              확인
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-6">
       <div className="max-w-2xl mx-auto">
@@ -641,6 +765,9 @@ export default function StudentPlay() {
           <div className="text-center">
             <p className="text-gray-600 mb-2">현재 점수</p>
             <p className="text-4xl font-bold text-blue-600">{currentScore}점</p>
+            {verifiedTeamName && (
+              <p className="text-sm text-gray-500 mt-2">소속 팀: {verifiedTeamName}</p>
+            )}
           </div>
         </div>
 
@@ -648,6 +775,15 @@ export default function StudentPlay() {
         <div className="bg-white rounded-lg shadow-lg p-8 mb-6">
           <h2 className="text-2xl font-bold text-gray-800 mb-6">문제</h2>
           <p className="text-lg text-gray-700 mb-8">{question.questionText}</p>
+          {question.imageUrl && (
+            <div className="mb-8">
+              <img
+                src={question.imageUrl}
+                alt="문제 이미지"
+                className="max-w-[50%] h-auto max-h-[200px] rounded-lg border border-gray-300 object-contain"
+              />
+            </div>
+          )}
           
           {isCompleted ? (
             <div className="space-y-4">

@@ -1,6 +1,6 @@
 // AdminDashboard.jsx
 import { useState, useEffect } from 'react';
-import { db } from '../firebase';
+import { db, storage } from '../firebase';
 import { 
   collection, 
   doc, 
@@ -14,6 +14,8 @@ import {
   increment,
   writeBatch
 } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import imageCompression from 'browser-image-compression';
 import QRCodeSVG from 'react-qr-code';
 import { X, AlertCircle, Edit2, Trash2 } from 'lucide-react';
 
@@ -35,11 +37,17 @@ export default function AdminDashboard() {
   const [newActivityEducationalContext, setNewActivityEducationalContext] = useState('');
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamType, setNewTeamType] = useState('citizen');
+  const [newTeamMemberCount, setNewTeamMemberCount] = useState(1); // 팀 인원수
   const [selectedTeamForQuestion, setSelectedTeamForQuestion] = useState('');
   const [newQuestionText, setNewQuestionText] = useState('');
   const [newQuestionAnswer, setNewQuestionAnswer] = useState('');
   const [newQuestionScore, setNewQuestionScore] = useState(10);
   const [newQuestionEducationalContext, setNewQuestionEducationalContext] = useState('');
+  const [newQuestionImageUrl, setNewQuestionImageUrl] = useState(''); // 문제 이미지 URL
+  const [newQuestionImageFile, setNewQuestionImageFile] = useState(null); // 문제 이미지 파일
+  const [newQuestionImagePreview, setNewQuestionImagePreview] = useState(null); // 문제 이미지 미리보기
+  const [isUploadingQuestionImage, setIsUploadingQuestionImage] = useState(false); // 이미지 업로드 중
+  const [generatedAccessCodes, setGeneratedAccessCodes] = useState({}); // 생성된 고유번호 저장 {teamId: [codes]}
   const [submissions, setSubmissions] = useState([]);
   const [showSubmissions, setShowSubmissions] = useState(false);
   const [activeTab, setActiveTab] = useState('questions'); // 'questions', 'monitoring', 'statistics'
@@ -108,7 +116,7 @@ export default function AdminDashboard() {
   // 활동 목록 로드
   const loadActivities = async () => {
     try {
-      const snapshot = await getDocs(collection(db, 'activities'));
+      const snapshot = await getDocs(query(collection(db, 'activities'), orderBy('createdAt', 'asc')));
       const activitiesList = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
@@ -191,26 +199,262 @@ export default function AdminDashboard() {
     }
   };
 
-  // 팀 추가
+  // 3자리 고유번호 생성 함수
+  const generateUniqueCode = () => {
+    // 100~999 사이의 랜덤 숫자 생성
+    return Math.floor(100 + Math.random() * 900).toString();
+  };
+
+  // 팀 추가 (고유번호 생성 포함)
   const handleAddTeam = async () => {
     if (!selectedActivity || !newTeamName.trim()) return;
+    if (newTeamMemberCount < 1 || newTeamMemberCount > 100) {
+      alert('인원수는 1명 이상 100명 이하로 입력해주세요.');
+      return;
+    }
     
     try {
       const activityRef = doc(db, 'activities', selectedActivity);
-      await addDoc(collection(activityRef, 'teams'), {
+      
+      // 중복 이름 체크
+      const existingTeamsSnapshot = await getDocs(collection(activityRef, 'teams'));
+      const existingTeamNames = existingTeamsSnapshot.docs.map(doc => doc.data().name);
+      if (existingTeamNames.includes(newTeamName.trim())) {
+        alert('동일한 이름의 팀이 이미 존재합니다.');
+        return;
+      }
+      
+      // 팀 생성
+      const teamRef = await addDoc(collection(activityRef, 'teams'), {
         name: newTeamName,
         type: newTeamType,
-        score: 0
+        score: 0,
+        memberCount: newTeamMemberCount
       });
+      
+      // 고유번호 생성 및 저장
+      const accessCodes = [];
+      const usedCodes = new Set();
+      
+      // 인원수만큼 고유번호 생성
+      for (let i = 0; i < newTeamMemberCount; i++) {
+        let code;
+        let attempts = 0;
+        
+        // 중복되지 않는 번호 생성 (최대 1000번 시도)
+        do {
+          code = generateUniqueCode();
+          attempts++;
+          if (attempts > 1000) {
+            alert('고유번호 생성에 실패했습니다. 다시 시도해주세요.');
+            return;
+          }
+        } while (usedCodes.has(code));
+        
+        usedCodes.add(code);
+        accessCodes.push(code);
+        
+        // access_codes 컬렉션에 저장
+        await addDoc(collection(teamRef, 'access_codes'), {
+          code: code,
+          is_used: false,
+          team_id: teamRef.id,
+          createdAt: new Date()
+        });
+      }
+      
+      // 생성된 고유번호를 상태에 저장 (화면 표시용)
+      setGeneratedAccessCodes(prev => ({
+        ...prev,
+        [teamRef.id]: accessCodes
+      }));
+      
       setNewTeamName('');
+      setNewTeamMemberCount(1);
       loadTeams();
+      
+      // 생성 완료 알림
+      alert(`${newTeamName} 팀이 생성되었습니다.\n생성된 고유번호: ${accessCodes.join(', ')}`);
     } catch (error) {
       console.error('팀 추가 오류:', error);
       alert('팀 추가에 실패했습니다.');
     }
   };
 
-  // 팀 목록 로드
+  // 팀 삭제
+  const handleDeleteTeam = async (teamId) => {
+    if (!selectedActivity) return;
+    
+    if (!confirm('정말 이 팀을 삭제하시겠습니까?\n팀의 모든 문제와 고유번호가 함께 삭제됩니다.')) {
+      return;
+    }
+    
+    try {
+      const activityRef = doc(db, 'activities', selectedActivity);
+      const teamRef = doc(activityRef, 'teams', teamId);
+      
+      // 팀의 하위 컬렉션 삭제
+      const batch = writeBatch(db);
+      
+      // 문제 삭제
+      const questionsSnapshot = await getDocs(collection(teamRef, 'questions'));
+      questionsSnapshot.docs.forEach(questionDoc => {
+        batch.delete(doc(teamRef, 'questions', questionDoc.id));
+      });
+      
+      // 고유번호 삭제
+      const accessCodesSnapshot = await getDocs(collection(teamRef, 'access_codes'));
+      accessCodesSnapshot.docs.forEach(accessCodeDoc => {
+        batch.delete(doc(teamRef, 'access_codes', accessCodeDoc.id));
+      });
+      
+      // 팀 삭제
+      batch.delete(teamRef);
+      
+      await batch.commit();
+      
+      loadTeams();
+      alert('팀이 삭제되었습니다.');
+    } catch (error) {
+      console.error('팀 삭제 오류:', error);
+      alert('팀 삭제에 실패했습니다.');
+    }
+  };
+
+  // 팀 이름 수정
+  const handleUpdateTeamName = async (teamId, newName) => {
+    if (!selectedActivity || !newName.trim()) {
+      alert('팀 이름을 입력해주세요.');
+      return;
+    }
+    
+    try {
+      const activityRef = doc(db, 'activities', selectedActivity);
+      
+      // 중복 이름 체크 (현재 팀 제외)
+      const existingTeamsSnapshot = await getDocs(collection(activityRef, 'teams'));
+      const existingTeamNames = existingTeamsSnapshot.docs
+        .filter(doc => doc.id !== teamId)
+        .map(doc => doc.data().name);
+      
+      if (existingTeamNames.includes(newName.trim())) {
+        alert('동일한 이름의 팀이 이미 존재합니다.');
+        return;
+      }
+      
+      const teamRef = doc(activityRef, 'teams', teamId);
+      await updateDoc(teamRef, {
+        name: newName.trim()
+      });
+      
+      loadTeams();
+    } catch (error) {
+      console.error('팀 이름 수정 오류:', error);
+      alert('팀 이름 수정에 실패했습니다.');
+    }
+  };
+
+  // 팀 인원수 수정 (고유번호 추가/삭제)
+  const handleUpdateTeamMemberCount = async (teamId, newMemberCount) => {
+    if (!selectedActivity) return;
+    if (newMemberCount < 1 || newMemberCount > 100) {
+      alert('인원수는 1명 이상 100명 이하로 입력해주세요.');
+      return;
+    }
+    
+    try {
+      const activityRef = doc(db, 'activities', selectedActivity);
+      const teamRef = doc(activityRef, 'teams', teamId);
+      
+      // 현재 팀 정보 가져오기
+      const teamSnap = await getDoc(teamRef);
+      if (!teamSnap.exists()) {
+        alert('팀을 찾을 수 없습니다.');
+        return;
+      }
+      
+      const currentMemberCount = teamSnap.data().memberCount || 0;
+      const difference = newMemberCount - currentMemberCount;
+      
+      if (difference > 0) {
+        // 인원수 증가: 고유번호 추가 생성
+        const accessCodes = [];
+        const usedCodes = new Set();
+        
+        // 기존 고유번호 가져오기 (중복 방지)
+        const existingCodesSnapshot = await getDocs(collection(teamRef, 'access_codes'));
+        existingCodesSnapshot.docs.forEach(doc => {
+          usedCodes.add(doc.data().code);
+        });
+        
+        // 추가 인원수만큼 고유번호 생성
+        for (let i = 0; i < difference; i++) {
+          let code;
+          let attempts = 0;
+          
+          do {
+            code = generateUniqueCode();
+            attempts++;
+            if (attempts > 1000) {
+              alert('고유번호 생성에 실패했습니다. 다시 시도해주세요.');
+              return;
+            }
+          } while (usedCodes.has(code));
+          
+          usedCodes.add(code);
+          accessCodes.push(code);
+          
+          await addDoc(collection(teamRef, 'access_codes'), {
+            code: code,
+            is_used: false,
+            team_id: teamId,
+            createdAt: new Date()
+          });
+        }
+        
+        // 팀 정보 업데이트
+        await updateDoc(teamRef, {
+          memberCount: newMemberCount
+        });
+        
+        alert(`${difference}개의 고유번호가 추가되었습니다.\n추가된 고유번호: ${accessCodes.join(', ')}`);
+      } else if (difference < 0) {
+        // 인원수 감소: 사용되지 않은 고유번호부터 삭제
+        const unusedCodesSnapshot = await getDocs(
+          query(
+            collection(teamRef, 'access_codes'),
+            where('is_used', '==', false)
+          )
+        );
+        
+        const codesToDelete = Math.min(Math.abs(difference), unusedCodesSnapshot.docs.length);
+        
+        if (codesToDelete < Math.abs(difference)) {
+          alert(`사용되지 않은 고유번호가 ${codesToDelete}개만 있어서 ${codesToDelete}개만 삭제됩니다.`);
+        }
+        
+        const batch = writeBatch(db);
+        for (let i = 0; i < codesToDelete; i++) {
+          batch.delete(unusedCodesSnapshot.docs[i].ref);
+        }
+        await batch.commit();
+        
+        // 팀 정보 업데이트
+        await updateDoc(teamRef, {
+          memberCount: newMemberCount
+        });
+        
+        alert(`${codesToDelete}개의 미사용 고유번호가 삭제되었습니다.`);
+      }
+      
+      loadTeams();
+    } catch (error) {
+      console.error('팀 인원수 수정 오류:', error);
+      alert('팀 인원수 수정에 실패했습니다.');
+    }
+  };
+
+  // 팀 목록 로드 (고유번호 포함)
   const loadTeams = async () => {
     if (!selectedActivity) return;
     
@@ -223,19 +467,81 @@ export default function AdminDashboard() {
       }));
       setTeams(teamsList);
       
-      // 각 팀의 문제 목록도 로드
+      // 각 팀의 고유번호도 로드
+      const accessCodesMap = {};
+      for (const team of teamsList) {
+        const teamRef = doc(activityRef, 'teams', team.id);
+        const accessCodesSnapshot = await getDocs(collection(teamRef, 'access_codes'));
+        const codes = accessCodesSnapshot.docs.map(doc => doc.data().code);
+        if (codes.length > 0) {
+          accessCodesMap[team.id] = codes;
+        }
+      }
+      setGeneratedAccessCodes(prev => ({ ...prev, ...accessCodesMap }));
+      
+      // 각 팀의 문제 목록도 로드 (정렬 포함)
       const questionsMap = {};
       for (const team of teamsList) {
         const teamRef = doc(activityRef, 'teams', team.id);
-        const questionsSnapshot = await getDocs(collection(teamRef, 'questions'));
-        questionsMap[team.id] = questionsSnapshot.docs.map(qDoc => ({
-          id: qDoc.id,
-          ...qDoc.data()
-        }));
+        try {
+          const questionsSnapshot = await getDocs(query(collection(teamRef, 'questions'), orderBy('createdAt', 'asc')));
+          questionsMap[team.id] = questionsSnapshot.docs.map(qDoc => ({
+            id: qDoc.id,
+            ...qDoc.data()
+          }));
+        } catch (error) {
+          // createdAt 필드가 없는 경우 정렬 없이 로드
+          console.warn('문제 목록 정렬 실패, createdAt 필드가 없을 수 있습니다:', error);
+          const questionsSnapshot = await getDocs(collection(teamRef, 'questions'));
+          questionsMap[team.id] = questionsSnapshot.docs.map(qDoc => ({
+            id: qDoc.id,
+            ...qDoc.data()
+          }));
+        }
       }
       setQuestions(questionsMap);
     } catch (error) {
       console.error('팀 목록 로드 오류:', error);
+    }
+  };
+
+  // 문제 이미지 파일 선택 핸들러
+  const handleQuestionImageChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) {
+      setNewQuestionImageFile(null);
+      setNewQuestionImagePreview(null);
+      setNewQuestionImageUrl('');
+      return;
+    }
+
+    try {
+      setIsUploadingQuestionImage(true);
+      
+      // 이미지 크기 조정 (작성자 이름 입력 칸의 절반 크기 이하로 제한)
+      // 작성자 이름 입력 칸은 보통 전체 너비이므로, 이미지는 최대 400px로 제한
+      const options = {
+        maxSizeMB: 0.5, // 최대 500KB
+        maxWidthOrHeight: 400, // 최대 400px (작성자 이름 입력 칸의 절반 정도)
+        useWebWorker: true
+      };
+      
+      const compressedFile = await imageCompression(file, options);
+      setNewQuestionImageFile(compressedFile);
+      
+      // 미리보기 생성
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setNewQuestionImagePreview(reader.result);
+        setIsUploadingQuestionImage(false);
+      };
+      reader.readAsDataURL(compressedFile);
+    } catch (error) {
+      console.error('이미지 압축 오류:', error);
+      alert('이미지 처리에 실패했습니다.');
+      setIsUploadingQuestionImage(false);
+      setNewQuestionImageFile(null);
+      setNewQuestionImagePreview(null);
     }
   };
 
@@ -247,14 +553,41 @@ export default function AdminDashboard() {
       const activityRef = doc(db, 'activities', selectedActivity);
       const teamRef = doc(activityRef, 'teams', selectedTeamForQuestion);
       
+      let imageUrl = newQuestionImageUrl.trim();
+      
+      // 이미지 파일이 있으면 업로드
+      if (newQuestionImageFile) {
+        setIsUploadingQuestionImage(true);
+        try {
+          // Firebase Storage에 업로드
+          const storageRef = ref(storage, `questions/${selectedActivity}/${selectedTeamForQuestion}/${Date.now()}_${newQuestionImageFile.name}`);
+          await uploadBytes(storageRef, newQuestionImageFile);
+          
+          // 다운로드 URL 가져오기
+          imageUrl = await getDownloadURL(storageRef);
+          console.log('문제 이미지 업로드 성공:', imageUrl);
+        } catch (uploadError) {
+          console.error('이미지 업로드 오류:', uploadError);
+          alert('이미지 업로드에 실패했습니다. 이미지 없이 문제를 추가합니다.');
+          imageUrl = '';
+        } finally {
+          setIsUploadingQuestionImage(false);
+        }
+      }
+      
       const questionData = {
         questionText: newQuestionText,
         answer: newQuestionAnswer,
-        score: parseInt(newQuestionScore)
+        score: parseInt(newQuestionScore),
+        createdAt: new Date()
       };
       
       if (newQuestionEducationalContext.trim()) {
         questionData.educationalContext = newQuestionEducationalContext.trim();
+      }
+      
+      if (imageUrl) {
+        questionData.imageUrl = imageUrl;
       }
       
       const docRef = await addDoc(collection(teamRef, 'questions'), questionData);
@@ -268,10 +601,19 @@ export default function AdminDashboard() {
       setNewQuestionAnswer('');
       setNewQuestionScore(10);
       setNewQuestionEducationalContext('');
+      setNewQuestionImageUrl('');
+      setNewQuestionImageFile(null);
+      setNewQuestionImagePreview(null);
+      
+      // 파일 input 초기화
+      const fileInput = document.querySelector('input[type="file"][accept="image/*"]');
+      if (fileInput) fileInput.value = '';
+      
       loadTeams();
     } catch (error) {
       console.error('문제 추가 오류:', error);
       alert('문제 추가에 실패했습니다.');
+      setIsUploadingQuestionImage(false);
     }
   };
 
@@ -287,6 +629,46 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error('문제 삭제 오류:', error);
       alert('문제 삭제에 실패했습니다.');
+    }
+  };
+
+  // 문제 이미지 업로드 및 수정
+  const handleUpdateQuestionImage = async (teamId, questionId, file) => {
+    if (!selectedActivity || !file) return;
+    
+    try {
+      setIsUploadingQuestionImage(true);
+      
+      // 이미지 크기 조정
+      const options = {
+        maxSizeMB: 0.5,
+        maxWidthOrHeight: 400,
+        useWebWorker: true
+      };
+      
+      const compressedFile = await imageCompression(file, options);
+      
+      // Firebase Storage에 업로드
+      const storageRef = ref(storage, `questions/${selectedActivity}/${teamId}/${Date.now()}_${compressedFile.name}`);
+      await uploadBytes(storageRef, compressedFile);
+      
+      // 다운로드 URL 가져오기
+      const imageUrl = await getDownloadURL(storageRef);
+      
+      // 문제 데이터 업데이트
+      const activityRef = doc(db, 'activities', selectedActivity);
+      const teamRef = doc(activityRef, 'teams', teamId);
+      await updateDoc(doc(teamRef, 'questions', questionId), {
+        imageUrl: imageUrl
+      });
+      
+      loadTeams();
+      alert('이미지가 업로드되었습니다.');
+    } catch (error) {
+      console.error('이미지 업로드 오류:', error);
+      alert('이미지 업로드에 실패했습니다.');
+    } finally {
+      setIsUploadingQuestionImage(false);
     }
   };
 
@@ -386,7 +768,17 @@ export default function AdminDashboard() {
               // 퇴출자 명단에 바로 추가 (현재 활동의 알림만)
               if (notif.activityId === selectedActivity) {
                 setEliminatedList(current => {
-                  const studentName = notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  // 새로운 포맷: ['활동명'] 의 '사용자명' 퇴출
+                  // 기존 포맷: 사용자명 학생이 퇴출되었습니다!
+                  let studentName = '';
+                  if (notif.text.includes("'") && notif.text.includes('퇴출')) {
+                    // 새 포맷 파싱
+                    const match = notif.text.match(/'([^']+)' 퇴출/);
+                    studentName = match ? match[1] : notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  } else {
+                    // 기존 포맷 파싱 (하위 호환성)
+                    studentName = notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  }
                   const isDuplicate = current.some(item => {
                     const itemTime = item.timestamp?.seconds || (item.timestamp?.toDate ? item.timestamp.toDate().getTime() : 0);
                     const notifTimeValue = notif.timestamp?.seconds || (notif.timestamp?.toDate ? notif.timestamp.toDate().getTime() : 0);
@@ -414,7 +806,17 @@ export default function AdminDashboard() {
               // 퇴출자 명단에 추가 (중복 방지, 현재 활동의 알림만)
               if (notif.activityId === selectedActivity) {
                 setEliminatedList(current => {
-                  const studentName = notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  // 새로운 포맷: ['활동명'] 의 '사용자명' 퇴출
+                  // 기존 포맷: 사용자명 학생이 퇴출되었습니다!
+                  let studentName = '';
+                  if (notif.text.includes("'") && notif.text.includes('퇴출')) {
+                    // 새 포맷 파싱
+                    const match = notif.text.match(/'([^']+)' 퇴출/);
+                    studentName = match ? match[1] : notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  } else {
+                    // 기존 포맷 파싱 (하위 호환성)
+                    studentName = notif.text.replace(' 학생이 퇴출되었습니다!', '').trim();
+                  }
                   const isDuplicate = current.some(item => {
                     const itemTime = item.timestamp?.seconds || (item.timestamp?.toDate ? item.timestamp.toDate().getTime() : 0);
                     const notifTimeValue = notif.timestamp?.seconds || (notif.timestamp?.toDate ? notif.timestamp.toDate().getTime() : 0);
@@ -834,6 +1236,15 @@ export default function AdminDashboard() {
                       <option value="citizen">시민</option>
                       <option value="joker">조커</option>
                     </select>
+                    <input
+                      type="number"
+                      value={newTeamMemberCount}
+                      onChange={(e) => setNewTeamMemberCount(parseInt(e.target.value) || 1)}
+                      placeholder="인원수"
+                      min="1"
+                      max="100"
+                      className="w-24 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
                     <button
                       onClick={handleAddTeam}
                       className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
@@ -841,6 +1252,92 @@ export default function AdminDashboard() {
                       팀 추가
                     </button>
                   </div>
+                </div>
+
+                {/* 팀 목록 및 관리 */}
+                <div className="bg-white rounded-lg shadow-md p-6">
+                  <h2 className="text-2xl font-semibold text-gray-700 mb-4">팀 목록</h2>
+                  {teams.length === 0 ? (
+                    <p className="text-gray-500 text-center py-4">등록된 팀이 없습니다.</p>
+                  ) : (
+                    <div className="space-y-4">
+                      {teams.map((team) => (
+                        <div
+                          key={team.id}
+                          className="border-2 border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors"
+                        >
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex-1">
+                              <div className="flex items-center gap-3 mb-2">
+                                <h3 className="text-xl font-semibold text-gray-800">{team.name}</h3>
+                                <span
+                                  className={`px-3 py-1 rounded-full text-sm font-medium ${
+                                    team.type === 'joker'
+                                      ? 'bg-red-100 text-red-800'
+                                      : 'bg-blue-100 text-blue-800'
+                                  }`}
+                                >
+                                  {team.type === 'joker' ? '조커' : '시민'}
+                                </span>
+                                <span className="text-sm text-gray-600">
+                                  점수: {team.score || 0}점
+                                </span>
+                              </div>
+                              <p className="text-sm text-gray-600">
+                                인원수: {team.memberCount || 0}명
+                              </p>
+                              {generatedAccessCodes[team.id] && (
+                                <div className="mt-2 p-2 bg-gray-50 rounded">
+                                  <p className="text-xs text-gray-600 mb-1">생성된 고유번호:</p>
+                                  <p className="text-sm font-mono text-gray-800">
+                                    {generatedAccessCodes[team.id].join(', ')}
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex gap-2 ml-4">
+                              <button
+                                onClick={() => {
+                                  const newName = prompt('팀 이름을 수정하세요:', team.name);
+                                  if (newName && newName.trim() !== team.name) {
+                                    handleUpdateTeamName(team.id, newName.trim());
+                                  }
+                                }}
+                                className="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm transition-colors"
+                                title="팀 이름 수정"
+                              >
+                                이름 수정
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const newCount = prompt('인원수를 수정하세요:', team.memberCount || 1);
+                                  if (newCount) {
+                                    const count = parseInt(newCount);
+                                    if (!isNaN(count) && count > 0) {
+                                      handleUpdateTeamMemberCount(team.id, count);
+                                    } else {
+                                      alert('올바른 숫자를 입력해주세요.');
+                                    }
+                                  }
+                                }}
+                                className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm transition-colors"
+                                title="인원수 수정"
+                              >
+                                인원수 수정
+                              </button>
+                              <button
+                                onClick={() => handleDeleteTeam(team.id)}
+                                className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm transition-colors"
+                                title="팀 삭제"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* 문제 등록 */}
@@ -905,6 +1402,51 @@ export default function AdminDashboard() {
                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        문제 이미지 (선택사항)
+                      </label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleQuestionImageChange}
+                        disabled={isUploadingQuestionImage}
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+                      />
+                      {isUploadingQuestionImage && (
+                        <p className="text-sm text-blue-600 mt-2">📷 이미지 처리 중...</p>
+                      )}
+                      {newQuestionImagePreview && (
+                        <div className="mt-3">
+                          <p className="text-sm text-gray-600 mb-2">이미지 미리보기:</p>
+                          <img
+                            src={newQuestionImagePreview}
+                            alt="문제 이미지 미리보기"
+                            className="max-w-[50%] h-auto max-h-[200px] rounded-lg border border-gray-300 object-contain"
+                          />
+                          <button
+                            onClick={() => {
+                              setNewQuestionImageFile(null);
+                              setNewQuestionImagePreview(null);
+                              setNewQuestionImageUrl('');
+                              const fileInput = document.querySelector('input[type="file"][accept="image/*"]');
+                              if (fileInput) fileInput.value = '';
+                            }}
+                            className="mt-2 text-sm text-red-600 hover:text-red-700"
+                          >
+                            이미지 제거
+                          </button>
+                        </div>
+                      )}
+                      {/* 기존 URL 입력도 유지 (하위 호환성) */}
+                      <input
+                        type="text"
+                        value={newQuestionImageUrl}
+                        onChange={(e) => setNewQuestionImageUrl(e.target.value)}
+                        placeholder="또는 이미지 URL을 직접 입력 (선택사항)"
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 mt-2"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -936,6 +1478,15 @@ export default function AdminDashboard() {
                               >
                                 <div className="mb-2">
                                   <p className="font-semibold">문제: {question.questionText}</p>
+                                  {question.imageUrl && (
+                                    <div className="mt-2 mb-2">
+                                      <img
+                                        src={question.imageUrl}
+                                        alt="문제 이미지"
+                                        className="max-w-[50%] h-auto max-h-[200px] rounded-lg border border-gray-300 object-contain"
+                                      />
+                                    </div>
+                                  )}
                                   <p className="text-sm text-gray-600">정답: {question.answer}</p>
                                   <p className="text-sm text-blue-600">배점: {question.score}점</p>
                                   {question.completed && completedSubmission && (
@@ -944,7 +1495,7 @@ export default function AdminDashboard() {
                                     </p>
                                   )}
                                 </div>
-                                <div className="flex gap-2 mb-4">
+                                <div className="flex gap-2 mb-4 flex-wrap">
                                   <button
                                     onClick={() => {
                                       const newText = prompt('문제 내용 수정:', question.questionText);
@@ -954,7 +1505,40 @@ export default function AdminDashboard() {
                                     }}
                                     className="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm"
                                   >
-                                    수정
+                                    내용 수정
+                                  </button>
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    onChange={(e) => {
+                                      const file = e.target.files[0];
+                                      if (file) {
+                                        handleUpdateQuestionImage(team.id, question.id, file);
+                                      }
+                                      // input 초기화
+                                      e.target.value = '';
+                                    }}
+                                    className="hidden"
+                                    id={`image-upload-${team.id}-${question.id}`}
+                                    disabled={isUploadingQuestionImage}
+                                  />
+                                  <label
+                                    htmlFor={`image-upload-${team.id}-${question.id}`}
+                                    className={`px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm cursor-pointer inline-block ${
+                                      isUploadingQuestionImage ? 'opacity-50 cursor-not-allowed' : ''
+                                    }`}
+                                  >
+                                    {isUploadingQuestionImage ? '업로드 중...' : '이미지 수정'}
+                                  </label>
+                                  <button
+                                    onClick={() => {
+                                      if (confirm('이미지를 삭제하시겠습니까?')) {
+                                        handleUpdateQuestion(team.id, question.id, 'imageUrl', null);
+                                      }
+                                    }}
+                                    className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
+                                  >
+                                    이미지 삭제
                                   </button>
                                   <button
                                     onClick={() => {
