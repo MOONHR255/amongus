@@ -1,5 +1,6 @@
 // AdminDashboard.jsx
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import React, { createElement } from 'react';
 import { db, storage } from '../firebase';
 import { 
   collection, 
@@ -19,7 +20,9 @@ import {
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import imageCompression from 'browser-image-compression';
 import QRCodeSVG from 'react-qr-code';
-import { X, AlertCircle, Edit2, Trash2 } from 'lucide-react';
+import { X, AlertCircle, Edit2, Trash2, Copy, Printer } from 'lucide-react';
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 
 const ADMIN_PASSWORD = 'admin123';
 
@@ -201,10 +204,297 @@ export default function AdminDashboard() {
     }
   };
 
+  // PDF 출력용 ref
+  const printRef = useRef(null);
+
+  // PDF 생성 및 다운로드 함수
+  const handleGeneratePDF = async () => {
+    console.log("버튼 클릭됨 - PDF 생성 시작");
+    
+    // 데이터 확인
+    if (!selectedActivity) {
+      alert('활동이 선택되지 않았습니다.');
+      return;
+    }
+    
+    const activityName = activities.find(a => a.id === selectedActivity)?.name || '';
+    let hasData = false;
+    let totalQuestions = 0;
+    
+    teams.forEach(team => {
+      const teamQuestions = questions[team.id] || [];
+      totalQuestions += teamQuestions.length;
+      if (teamQuestions.length > 0) {
+        hasData = true;
+      }
+    });
+    
+    if (!hasData || totalQuestions === 0) {
+      alert('인쇄할 데이터가 없습니다.');
+      return;
+    }
+    
+    try {
+      // PDF 생성용 임시 컨테이너 생성
+      const tempContainer = document.createElement('div');
+      tempContainer.style.position = 'absolute';
+      tempContainer.style.left = '-9999px';
+      tempContainer.style.width = '210mm'; // A4 너비
+      tempContainer.style.backgroundColor = 'white';
+      document.body.appendChild(tempContainer);
+
+      // 모든 QR 코드 데이터 수집
+      const allQRData = [];
+      teams.forEach(team => {
+        const teamQuestions = questions[team.id] || [];
+        teamQuestions.forEach((question, index) => {
+          const qrUrl = `${window.location.origin}/play/${selectedActivity}/${team.id}/${question.questionId || question.id}`;
+          allQRData.push({
+            activityName,
+            teamName: team.name,
+            questionNumber: index + 1,
+            qrUrl,
+            question
+          });
+        });
+      });
+
+      // 8개씩 페이지 분할
+      const pages = [];
+      for (let i = 0; i < allQRData.length; i += 8) {
+        pages.push(allQRData.slice(i, i + 8));
+      }
+
+      // React 컴포넌트로 QR 코드 렌더링
+      const { createRoot } = await import('react-dom/client');
+      const root = createRoot(tempContainer);
+      
+      root.render(
+        createElement('div', null,
+          pages.map((pageData, pageIndex) =>
+            createElement('div', {
+              key: pageIndex,
+              style: {
+                width: '210mm',
+                height: '297mm',
+                padding: '15mm',
+                boxSizing: 'border-box',
+                pageBreakAfter: pageIndex < pages.length - 1 ? 'always' : 'auto',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(2, 1fr)',
+                gridTemplateRows: 'repeat(4, 1fr)',
+                gap: '20px',
+                backgroundColor: 'white'
+              }
+            },
+              pageData.map((qrData, index) =>
+                createElement('div', {
+                  key: index,
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '15px',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px'
+                  }
+                },
+                  createElement('div', {
+                    style: { textAlign: 'center', marginBottom: '10px', width: '100%' }
+                  },
+                    createElement('p', { style: { margin: '2px 0', fontSize: '14px', fontWeight: '700', color: '#1f2937' } }, qrData.activityName),
+                    createElement('p', { style: { margin: '2px 0', fontSize: '12px', fontWeight: '500', color: '#1f2937' } }, qrData.teamName),
+                    createElement('p', { style: { margin: '2px 0', fontSize: '13px', fontWeight: '700', color: '#1f2937' } }, `${qrData.questionNumber}번 문제`)
+                  ),
+                  createElement('div', {
+                    style: { display: 'flex', justifyContent: 'center', alignItems: 'center' }
+                  },
+                    createElement(QRCodeSVG, { value: qrData.qrUrl, size: 150 })
+                  )
+                )
+              )
+            )
+          )
+        )
+      );
+
+      // QR 코드 렌더링 대기 (이미지 로드 완료 대기)
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // PDF 생성
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      // 각 페이지를 캡처하여 PDF에 추가
+      for (let i = 0; i < pages.length; i++) {
+        const pageElement = tempContainer.children[0]?.children[i];
+        if (!pageElement) continue;
+
+        const canvas = await html2canvas(pageElement, {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          width: 794, // 210mm * 3.779 (mm to px)
+          height: 1123 // 297mm * 3.779
+        });
+
+        const imgData = canvas.toDataURL('image/png');
+        const imgWidth = 210; // A4 너비 (mm)
+        const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+        if (i > 0) {
+          pdf.addPage();
+        }
+        
+        pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
+      }
+
+      // 임시 컨테이너 제거
+      document.body.removeChild(tempContainer);
+      root.unmount();
+
+      // PDF 저장
+      const fileName = `${activityName} 활동 pdf.pdf`;
+      pdf.save(fileName);
+      
+      console.log("PDF 생성 완료:", fileName);
+    } catch (error) {
+      console.error('PDF 생성 오류:', error);
+      alert('PDF 생성 중 오류가 발생했습니다: ' + error.message);
+    }
+  };
+
   // 3자리 고유번호 생성 함수
   const generateUniqueCode = () => {
     // 100~999 사이의 랜덤 숫자 생성
     return Math.floor(100 + Math.random() * 900).toString();
+  };
+
+  // 활동 복제 함수 (Deep Copy)
+  const handleDuplicateActivity = async (activityId) => {
+    if (!confirm('이 활동을 복제하시겠습니까?\n모든 팀과 문항이 함께 복제됩니다.')) {
+      return;
+    }
+
+    try {
+      // 원본 활동 정보 가져오기
+      const originalActivityRef = doc(db, 'activities', activityId);
+      const originalActivitySnap = await getDoc(originalActivityRef);
+      
+      if (!originalActivitySnap.exists()) {
+        alert('활동을 찾을 수 없습니다.');
+        return;
+      }
+
+      const originalActivityData = originalActivitySnap.data();
+      
+      // 새 활동 생성 (이름에 " (복사본)" 추가)
+      const newActivityData = {
+        name: `${originalActivityData.name} (복사본)`,
+        createdAt: new Date()
+      };
+      
+      if (originalActivityData.educationalContext) {
+        newActivityData.educationalContext = originalActivityData.educationalContext;
+      }
+
+      const newActivityRef = await addDoc(collection(db, 'activities'), newActivityData);
+
+      // 원본 팀 목록 가져오기
+      const teamsSnapshot = await getDocs(collection(originalActivityRef, 'teams'));
+      
+      // 각 팀 복제
+      for (const teamDoc of teamsSnapshot.docs) {
+        const originalTeamData = teamDoc.data();
+        const originalTeamRef = doc(originalActivityRef, 'teams', teamDoc.id);
+        
+        // 새 팀 생성 (동일한 구성 정보)
+        const newTeamRef = await addDoc(collection(newActivityRef, 'teams'), {
+          name: originalTeamData.name,
+          type: originalTeamData.type,
+          score: 0, // 점수는 초기화
+          memberCount: originalTeamData.memberCount || 0
+        });
+
+        // 고유번호 복제 (새로 생성)
+        const accessCodesSnapshot = await getDocs(collection(originalTeamRef, 'access_codes'));
+        const usedCodes = new Set();
+        
+        // 기존 코드 수만큼 새 코드 생성
+        for (const codeDoc of accessCodesSnapshot.docs) {
+          let code;
+          let attempts = 0;
+          
+          // 중복되지 않는 번호 생성 (최대 1000번 시도)
+          do {
+            code = generateUniqueCode();
+            attempts++;
+            if (attempts > 1000) {
+              alert('고유번호 생성에 실패했습니다. 다시 시도해주세요.');
+              return;
+            }
+          } while (usedCodes.has(code));
+          
+          usedCodes.add(code);
+          
+          await addDoc(collection(newTeamRef, 'access_codes'), {
+            code: code,
+            is_used: false,
+            team_id: newTeamRef.id,
+            createdAt: new Date()
+          });
+        }
+
+        // 원본 문항 목록 가져오기 (createdAt 순서대로)
+        let questionsSnapshot;
+        try {
+          questionsSnapshot = await getDocs(
+            query(collection(originalTeamRef, 'questions'), orderBy('createdAt', 'asc'))
+          );
+        } catch (error) {
+          // createdAt 필드가 없으면 정렬 없이 로드
+          questionsSnapshot = await getDocs(collection(originalTeamRef, 'questions'));
+        }
+
+        // 각 문항 복제
+        for (const questionDoc of questionsSnapshot.docs) {
+          const originalQuestionData = questionDoc.data();
+          
+          // 새 문항 생성 (새 ID, 새 questionId 자동 생성됨)
+          const newQuestionData = {
+            questionText: originalQuestionData.questionText,
+            answer: originalQuestionData.answer,
+            score: originalQuestionData.score || 10,
+            createdAt: new Date()
+          };
+
+          if (originalQuestionData.educationalContext) {
+            newQuestionData.educationalContext = originalQuestionData.educationalContext;
+          }
+
+          if (originalQuestionData.imageUrl) {
+            newQuestionData.imageUrl = originalQuestionData.imageUrl; // 이미지 URL은 동일하게 유지
+          }
+
+          const newQuestionRef = await addDoc(collection(newTeamRef, 'questions'), newQuestionData);
+          
+          // questionId 필드에 새 문서 ID 저장
+          await updateDoc(newQuestionRef, {
+            questionId: newQuestionRef.id
+          });
+        }
+      }
+
+      loadActivities();
+      alert('활동이 성공적으로 복제되었습니다.');
+    } catch (error) {
+      console.error('활동 복제 오류:', error);
+      alert('활동 복제에 실패했습니다.');
+    }
   };
 
   // 팀 추가 (고유번호 생성 포함)
@@ -1121,6 +1411,16 @@ export default function AdminDashboard() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
+                            handleDuplicateActivity(activity.id);
+                          }}
+                          className="p-2 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                          title="복제"
+                        >
+                          <Copy className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
                             const newName = prompt('활동 이름을 수정하세요:', activity.name);
                             if (newName && newName !== activity.name) {
                               handleUpdateActivity(activity.id, newName);
@@ -1454,7 +1754,18 @@ export default function AdminDashboard() {
 
                 {/* 문제 목록 & QR */}
                 <div className="bg-white rounded-lg shadow-md p-6">
-                  <h2 className="text-2xl font-semibold text-gray-700 mb-4">문제 목록</h2>
+                  <div className="flex justify-between items-center mb-4">
+                    <h2 className="text-2xl font-semibold text-gray-700">문제 목록</h2>
+                    {selectedActivity && teams.length > 0 && (
+                      <button
+                        onClick={handleGeneratePDF}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                      >
+                        <Printer className="w-4 h-4" />
+                        활동 pdf 생성
+                      </button>
+                    )}
+                  </div>
                   <div className="space-y-6">
                     {teams.map((team) => (
                       <div key={team.id} className="border-2 border-gray-200 rounded-lg p-4">
@@ -1462,8 +1773,10 @@ export default function AdminDashboard() {
                           {team.name} 팀
                         </h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {questions[team.id]?.map((question) => {
+                          {questions[team.id]?.map((question, questionIndex) => {
                             const qrUrl = `${window.location.origin}/play/${selectedActivity}/${team.id}/${question.questionId || question.id}`;
+                            const questionNumber = questionIndex + 1; // 문제 번호 (1번부터 시작)
+                            const activityName = activities.find(a => a.id === selectedActivity)?.name || '';
                             
                             // 해당 문제의 정답 제출자 찾기 (현재 활동의 submissions만 필터링)
                             const completedSubmission = submissions.find(sub => 
@@ -1479,7 +1792,7 @@ export default function AdminDashboard() {
                                 className="border border-gray-300 rounded-lg p-4"
                               >
                                 <div className="mb-2">
-                                  <p className="font-semibold">문제: {question.questionText}</p>
+                                  <p className="font-semibold">[{questionNumber}번 문제] {question.questionText}</p>
                                   {question.imageUrl && (
                                     <div className="mt-2 mb-2">
                                       <img
@@ -1553,9 +1866,16 @@ export default function AdminDashboard() {
                                     삭제
                                   </button>
                                 </div>
-                                <div className="bg-gray-50 p-2 rounded">
-                                  <QRCodeSVG value={qrUrl} size={128} />
-                                  <p className="text-xs text-gray-500 mt-2 break-all">{qrUrl}</p>
+                                <div className="bg-gray-50 p-4 rounded flex flex-col items-center">
+                                  {/* QR 코드 라벨 정보 */}
+                                  <div className="text-center mb-2 w-full">
+                                    <p className="font-semibold text-sm text-gray-800 mb-1">{activityName}</p>
+                                    <p className="font-medium text-sm text-gray-700 mb-1">{team.name}</p>
+                                    <p className="font-bold text-base text-gray-900">{questionNumber}번 문제</p>
+                                  </div>
+                                  {/* QR 코드 */}
+                                  <QRCodeSVG value={qrUrl} size={128} className="mx-auto" />
+                                  <p className="text-xs text-gray-500 mt-2 break-all text-center">{qrUrl}</p>
                                 </div>
                               </div>
                             );
