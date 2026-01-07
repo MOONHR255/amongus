@@ -28,7 +28,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/admin" element={<AdminDashboard />} />
-          <Route path="/play/:activityId/:teamId/:questionId" element={<StudentPlay />} />
+          <Route path="/play/:activityId/:questionId" element={<StudentPlay />} />
         </Routes>
       </div>
     </Router>

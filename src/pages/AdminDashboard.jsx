@@ -32,7 +32,7 @@ export default function AdminDashboard() {
   const [activities, setActivities] = useState([]);
   const [selectedActivity, setSelectedActivity] = useState(null);
   const [teams, setTeams] = useState([]);
-  const [questions, setQuestions] = useState({});
+  const [questions, setQuestions] = useState([]); // Activity 단위 공통 문제로 변경
   const [notifications, setNotifications] = useState([]);
   const [eliminatedList, setEliminatedList] = useState([]); // 퇴출자 명단
   const [activeNotifications, setActiveNotifications] = useState([]); // 현재 표시 중인 알림
@@ -43,7 +43,6 @@ export default function AdminDashboard() {
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamType, setNewTeamType] = useState('citizen');
   const [newTeamMemberCount, setNewTeamMemberCount] = useState(1); // 팀 인원수
-  const [selectedTeamForQuestion, setSelectedTeamForQuestion] = useState('');
   const [newQuestionText, setNewQuestionText] = useState('');
   const [newQuestionAnswer, setNewQuestionAnswer] = useState('');
   const [newQuestionScore, setNewQuestionScore] = useState(10);
@@ -98,6 +97,13 @@ export default function AdminDashboard() {
   const handleCreateActivity = async () => {
     if (!newActivityName.trim()) return;
     
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
+      return;
+    }
+    
     try {
       const activityData = {
         name: newActivityName,
@@ -120,6 +126,12 @@ export default function AdminDashboard() {
 
   // 활동 목록 로드
   const loadActivities = async () => {
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      return;
+    }
+    
     try {
       const snapshot = await getDocs(query(collection(db, 'activities'), orderBy('createdAt', 'asc')));
       const activitiesList = snapshot.docs.map(doc => ({
@@ -218,18 +230,9 @@ export default function AdminDashboard() {
     }
     
     const activityName = activities.find(a => a.id === selectedActivity)?.name || '';
-    let hasData = false;
-    let totalQuestions = 0;
     
-    teams.forEach(team => {
-      const teamQuestions = questions[team.id] || [];
-      totalQuestions += teamQuestions.length;
-      if (teamQuestions.length > 0) {
-        hasData = true;
-      }
-    });
-    
-    if (!hasData || totalQuestions === 0) {
+    // questions는 이제 배열입니다 (Activity 단위 공통 문제)
+    if (!Array.isArray(questions) || questions.length === 0) {
       alert('인쇄할 데이터가 없습니다.');
       return;
     }
@@ -243,21 +246,20 @@ export default function AdminDashboard() {
       tempContainer.style.backgroundColor = 'white';
       document.body.appendChild(tempContainer);
 
-      // 모든 QR 코드 데이터 수집
+      // 모든 QR 코드 데이터 수집 (Activity 단위 공통 문제)
       const allQRData = [];
-      teams.forEach(team => {
-        const teamQuestions = questions[team.id] || [];
-        teamQuestions.forEach((question, index) => {
-          const qrUrl = `${window.location.origin}/play/${selectedActivity}/${team.id}/${question.questionId || question.id}`;
+      if (Array.isArray(questions)) {
+        questions.forEach((question, index) => {
+          if (!question || !question.id) return; // 안전 장치
+          const qrUrl = `${window.location.origin}/play/${selectedActivity}/${question.questionId || question.id}`;
           allQRData.push({
             activityName,
-            teamName: team.name,
             questionNumber: index + 1,
             qrUrl,
             question
           });
         });
-      });
+      }
 
       // 8개씩 페이지 분할
       const pages = [];
@@ -277,13 +279,13 @@ export default function AdminDashboard() {
               style: {
                 width: '210mm',
                 height: '297mm',
-                padding: '15mm',
+                padding: '20mm 15mm 15mm 15mm',
                 boxSizing: 'border-box',
                 pageBreakAfter: pageIndex < pages.length - 1 ? 'always' : 'auto',
                 display: 'grid',
                 gridTemplateColumns: 'repeat(2, 1fr)',
                 gridTemplateRows: 'repeat(4, 1fr)',
-                gap: '20px',
+                gap: '15px',
                 backgroundColor: 'white'
               }
             },
@@ -294,23 +296,23 @@ export default function AdminDashboard() {
                     display: 'flex',
                     flexDirection: 'column',
                     alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: '15px',
+                    justifyContent: 'flex-start',
+                    padding: '10px',
                     border: '1px solid #e5e7eb',
-                    borderRadius: '8px'
+                    borderRadius: '8px',
+                    minHeight: '0'
                   }
                 },
                   createElement('div', {
-                    style: { textAlign: 'center', marginBottom: '10px', width: '100%' }
+                    style: { textAlign: 'center', marginBottom: '8px', width: '100%' }
                   },
-                    createElement('p', { style: { margin: '2px 0', fontSize: '14px', fontWeight: '700', color: '#1f2937' } }, qrData.activityName),
-                    createElement('p', { style: { margin: '2px 0', fontSize: '12px', fontWeight: '500', color: '#1f2937' } }, qrData.teamName),
-                    createElement('p', { style: { margin: '2px 0', fontSize: '13px', fontWeight: '700', color: '#1f2937' } }, `${qrData.questionNumber}번 문제`)
+                    createElement('p', { style: { margin: '2px 0', fontSize: '13px', fontWeight: '700', color: '#1f2937' } }, qrData.activityName),
+                    createElement('p', { style: { margin: '2px 0', fontSize: '12px', fontWeight: '700', color: '#1f2937' } }, `${qrData.questionNumber}번 문제`)
                   ),
                   createElement('div', {
-                    style: { display: 'flex', justifyContent: 'center', alignItems: 'center' }
+                    style: { display: 'flex', justifyContent: 'center', alignItems: 'center', flex: '1' }
                   },
-                    createElement(QRCodeSVG, { value: qrData.qrUrl, size: 150 })
+                    createElement(QRCodeSVG, { value: qrData.qrUrl, size: 140 })
                   )
                 )
               )
@@ -797,6 +799,48 @@ export default function AdminDashboard() {
     }
   };
 
+  // Activity 단위 공통 문제 목록 로드
+  const loadQuestions = async () => {
+    if (!selectedActivity) return;
+    
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      return;
+    }
+    
+    try {
+      const activityRef = doc(db, 'activities', selectedActivity);
+      if (!activityRef) {
+        console.error('activityRef를 생성할 수 없습니다.');
+        return;
+      }
+      
+      let questionsSnapshot;
+      try {
+        questionsSnapshot = await getDocs(query(collection(activityRef, 'questions'), orderBy('createdAt', 'asc')));
+      } catch (error) {
+        // createdAt 필드가 없는 경우 정렬 없이 로드
+        console.warn('문제 목록 정렬 실패, createdAt 필드가 없을 수 있습니다:', error);
+        questionsSnapshot = await getDocs(collection(activityRef, 'questions'));
+      }
+      
+      const questionsList = questionsSnapshot.docs.map(qDoc => ({
+        id: qDoc.id,
+        ...qDoc.data()
+      }));
+      // 배열이 아닌 경우 빈 배열로 설정
+      setQuestions(Array.isArray(questionsList) ? questionsList : []);
+    } catch (error) {
+      console.error('문제 목록 로드 오류:', error);
+      console.error('에러 상세:', error.message);
+      console.error('selectedActivity:', selectedActivity);
+      console.error('db 상태:', db);
+      // 에러 발생 시 빈 배열로 설정
+      setQuestions([]);
+    }
+  };
+
   // 문제 이미지 파일 선택 핸들러
   const handleQuestionImageChange = async (e) => {
     const file = e.target.files[0];
@@ -837,13 +881,33 @@ export default function AdminDashboard() {
     }
   };
 
-  // 문제 추가
+  // 문제 추가 (Activity 단위 공통 문제)
   const handleAddQuestion = async () => {
-    if (!selectedActivity || !selectedTeamForQuestion || !newQuestionText.trim() || !newQuestionAnswer.trim()) return;
+    if (!selectedActivity || !newQuestionText.trim() || !newQuestionAnswer.trim()) {
+      if (!selectedActivity) {
+        alert('활동을 선택해주세요.');
+      } else if (!newQuestionText.trim()) {
+        alert('문제 내용을 입력해주세요.');
+      } else if (!newQuestionAnswer.trim()) {
+        alert('정답을 입력해주세요.');
+      }
+      return;
+    }
+    
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
+      return;
+    }
     
     try {
       const activityRef = doc(db, 'activities', selectedActivity);
-      const teamRef = doc(activityRef, 'teams', selectedTeamForQuestion);
+      if (!activityRef) {
+        console.error('activityRef를 생성할 수 없습니다.');
+        alert('활동 정보를 찾을 수 없습니다.');
+        return;
+      }
       
       let imageUrl = newQuestionImageUrl.trim();
       
@@ -851,8 +915,8 @@ export default function AdminDashboard() {
       if (newQuestionImageFile) {
         setIsUploadingQuestionImage(true);
         try {
-          // Firebase Storage에 업로드
-          const storageRef = ref(storage, `questions/${selectedActivity}/${selectedTeamForQuestion}/${Date.now()}_${newQuestionImageFile.name}`);
+          // Firebase Storage에 업로드 (Activity 단위로 변경)
+          const storageRef = ref(storage, `questions/${selectedActivity}/${Date.now()}_${newQuestionImageFile.name}`);
           await uploadBytes(storageRef, newQuestionImageFile);
           
           // 다운로드 URL 가져오기
@@ -882,7 +946,8 @@ export default function AdminDashboard() {
         questionData.imageUrl = imageUrl;
       }
       
-      const docRef = await addDoc(collection(teamRef, 'questions'), questionData);
+      // Activity의 questions 컬렉션에 직접 추가
+      const docRef = await addDoc(collection(activityRef, 'questions'), questionData);
       
       // questionId 필드에 문서 ID 저장
       await updateDoc(docRef, {
@@ -901,7 +966,7 @@ export default function AdminDashboard() {
       const fileInput = document.querySelector('input[type="file"][accept="image/*"]');
       if (fileInput) fileInput.value = '';
       
-      loadTeams();
+      loadQuestions(); // 문제 목록 새로고침
     } catch (error) {
       console.error('문제 추가 오류:', error);
       alert('문제 추가에 실패했습니다.');
@@ -909,24 +974,37 @@ export default function AdminDashboard() {
     }
   };
 
-  // 문제 삭제
-  const handleDeleteQuestion = async (teamId, questionId) => {
+  // 문제 삭제 (Activity 단위)
+  const handleDeleteQuestion = async (questionId) => {
     if (!selectedActivity) return;
+    
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
+      return;
+    }
     
     try {
       const activityRef = doc(db, 'activities', selectedActivity);
-      const teamRef = doc(activityRef, 'teams', teamId);
-      await deleteDoc(doc(teamRef, 'questions', questionId));
-      loadTeams();
+      await deleteDoc(doc(activityRef, 'questions', questionId));
+      loadQuestions();
     } catch (error) {
       console.error('문제 삭제 오류:', error);
       alert('문제 삭제에 실패했습니다.');
     }
   };
 
-  // 문제 이미지 업로드 및 수정
-  const handleUpdateQuestionImage = async (teamId, questionId, file) => {
+  // 문제 이미지 업로드 및 수정 (Activity 단위)
+  const handleUpdateQuestionImage = async (questionId, file) => {
     if (!selectedActivity || !file) return;
+    
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
+      return;
+    }
     
     try {
       setIsUploadingQuestionImage(true);
@@ -940,8 +1018,8 @@ export default function AdminDashboard() {
       
       const compressedFile = await imageCompression(file, options);
       
-      // Firebase Storage에 업로드
-      const storageRef = ref(storage, `questions/${selectedActivity}/${teamId}/${Date.now()}_${compressedFile.name}`);
+      // Firebase Storage에 업로드 (Activity 단위로 변경)
+      const storageRef = ref(storage, `questions/${selectedActivity}/${Date.now()}_${compressedFile.name}`);
       await uploadBytes(storageRef, compressedFile);
       
       // 다운로드 URL 가져오기
@@ -949,12 +1027,11 @@ export default function AdminDashboard() {
       
       // 문제 데이터 업데이트
       const activityRef = doc(db, 'activities', selectedActivity);
-      const teamRef = doc(activityRef, 'teams', teamId);
-      await updateDoc(doc(teamRef, 'questions', questionId), {
+      await updateDoc(doc(activityRef, 'questions', questionId), {
         imageUrl: imageUrl
       });
       
-      loadTeams();
+      loadQuestions();
       alert('이미지가 업로드되었습니다.');
     } catch (error) {
       console.error('이미지 업로드 오류:', error);
@@ -964,17 +1041,22 @@ export default function AdminDashboard() {
     }
   };
 
-  // 문제 수정
-  const handleUpdateQuestion = async (teamId, questionId, field, value) => {
+  // 문제 수정 (Activity 단위)
+  const handleUpdateQuestion = async (questionId, field, value) => {
     if (!selectedActivity) return;
+    
+    // db 유효성 검사
+    if (!db) {
+      console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+      return;
+    }
     
     try {
       const activityRef = doc(db, 'activities', selectedActivity);
-      const teamRef = doc(activityRef, 'teams', teamId);
-      await updateDoc(doc(teamRef, 'questions', questionId), {
+      await updateDoc(doc(activityRef, 'questions', questionId), {
         [field]: value
       });
-      loadTeams();
+      loadQuestions();
     } catch (error) {
       console.error('문제 수정 오류:', error);
     }
@@ -984,8 +1066,25 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (selectedActivity) {
       loadTeams();
+      loadQuestions(); // 공통 문제 목록 로드
       setActiveTab('questions'); // 활동 선택 시 기본 탭으로 리셋
       
+      // questions 초기화 (활동 변경 시 이전 데이터 제거)
+      setQuestions([]);
+      
+      return () => {
+        // cleanup: 활동 변경 시 questions 초기화
+        setQuestions([]);
+      };
+    } else {
+      // 활동이 선택되지 않으면 questions 초기화
+      setQuestions([]);
+    }
+  }, [selectedActivity]);
+
+  // 실시간 팀 점수 감시 (별도 useEffect로 분리)
+  useEffect(() => {
+    if (selectedActivity) {
       // 실시간 팀 점수 감시
       const activityRef = doc(db, 'activities', selectedActivity);
       const unsubscribe = onSnapshot(
@@ -1642,22 +1741,11 @@ export default function AdminDashboard() {
                   )}
                 </div>
 
-                {/* 문제 등록 */}
+                {/* 문제 등록 (공통 문제) */}
                 <div className="bg-white rounded-lg shadow-md p-6">
-                  <h2 className="text-2xl font-semibold text-gray-700 mb-4">문제 등록</h2>
+                  <h2 className="text-2xl font-semibold text-gray-700 mb-4">공통 문제 등록</h2>
+                  <p className="text-sm text-gray-600 mb-4">등록한 문제는 모든 팀이 함께 풀 수 있는 공통 문제입니다.</p>
                   <div className="space-y-4">
-                    <select
-                      value={selectedTeamForQuestion}
-                      onChange={(e) => setSelectedTeamForQuestion(e.target.value)}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    >
-                      <option value="">팀 선택</option>
-                      {teams.map((team) => (
-                        <option key={team.id} value={team.id}>
-                          {team.name}
-                        </option>
-                      ))}
-                    </select>
                     <input
                       type="text"
                       value={newQuestionText}
@@ -1752,11 +1840,11 @@ export default function AdminDashboard() {
                   </div>
                 </div>
 
-                {/* 문제 목록 & QR */}
+                {/* 문제 목록 & QR (공통 문제) */}
                 <div className="bg-white rounded-lg shadow-md p-6">
                   <div className="flex justify-between items-center mb-4">
-                    <h2 className="text-2xl font-semibold text-gray-700">문제 목록</h2>
-                    {selectedActivity && teams.length > 0 && (
+                    <h2 className="text-2xl font-semibold text-gray-700">공통 문제 목록</h2>
+                    {selectedActivity && Array.isArray(questions) && questions.length > 0 && (
                       <button
                         onClick={handleGeneratePDF}
                         className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
@@ -1766,130 +1854,161 @@ export default function AdminDashboard() {
                       </button>
                     )}
                   </div>
-                  <div className="space-y-6">
-                    {teams.map((team) => (
-                      <div key={team.id} className="border-2 border-gray-200 rounded-lg p-4">
-                        <h3 className="text-xl font-semibold text-gray-700 mb-4">
-                          {team.name} 팀
-                        </h3>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {questions[team.id]?.map((question, questionIndex) => {
-                            const qrUrl = `${window.location.origin}/play/${selectedActivity}/${team.id}/${question.questionId || question.id}`;
-                            const questionNumber = questionIndex + 1; // 문제 번호 (1번부터 시작)
-                            const activityName = activities.find(a => a.id === selectedActivity)?.name || '';
-                            
-                            // 해당 문제의 정답 제출자 찾기 (현재 활동의 submissions만 필터링)
-                            const completedSubmission = submissions.find(sub => 
-                              sub?.activityId === selectedActivity &&
-                              sub.teamId === team.id &&
-                              sub.questionId === (question.questionId || question.id) &&
-                              sub.isCorrect === true
-                            );
-                            
-                            return (
-                              <div
-                                key={question.id}
-                                className="border border-gray-300 rounded-lg p-4"
-                              >
-                                <div className="mb-2">
-                                  <p className="font-semibold">[{questionNumber}번 문제] {question.questionText}</p>
-                                  {question.imageUrl && (
-                                    <div className="mt-2 mb-2">
-                                      <img
-                                        src={question.imageUrl}
-                                        alt="문제 이미지"
-                                        className="max-w-[50%] h-auto max-h-[200px] rounded-lg border border-gray-300 object-contain"
-                                      />
-                                    </div>
-                                  )}
-                                  <p className="text-sm text-gray-600">정답: {question.answer}</p>
-                                  <p className="text-sm text-blue-600">배점: {question.score}점</p>
-                                  {question.completed && completedSubmission && (
-                                    <p className="text-sm text-green-600 mt-1 font-semibold">
-                                      ✅ 제출 완료, 제출자: {completedSubmission.studentName || '알 수 없음'}
-                                    </p>
-                                  )}
-                                </div>
-                                <div className="flex gap-2 mb-4 flex-wrap">
-                                  <button
-                                    onClick={() => {
-                                      const newText = prompt('문제 내용 수정:', question.questionText);
-                                      if (newText) {
-                                        handleUpdateQuestion(team.id, question.id, 'questionText', newText);
-                                      }
-                                    }}
-                                    className="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm"
-                                  >
-                                    내용 수정
-                                  </button>
-                                  <input
-                                    type="file"
-                                    accept="image/*"
-                                    onChange={(e) => {
-                                      const file = e.target.files[0];
-                                      if (file) {
-                                        handleUpdateQuestionImage(team.id, question.id, file);
-                                      }
-                                      // input 초기화
-                                      e.target.value = '';
-                                    }}
-                                    className="hidden"
-                                    id={`image-upload-${team.id}-${question.id}`}
-                                    disabled={isUploadingQuestionImage}
+                  {!Array.isArray(questions) || questions.length === 0 ? (
+                    <p className="text-gray-500 text-center py-8">등록된 문제가 없습니다.</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {Array.isArray(questions) && questions.map((question, questionIndex) => {
+                        // 안전 장치: question이 유효한지 확인
+                        if (!question || !question.id) return null;
+                        
+                        // QR URL: 팀 정보 제거, Activity와 Question만 포함
+                        const qrUrl = `${window.location.origin}/play/${selectedActivity}/${question.questionId || question.id}`;
+                        const questionNumber = questionIndex + 1; // 문제 번호 (1번부터 시작)
+                        const activityName = activities.find(a => a.id === selectedActivity)?.name || '';
+                        
+                        // 해당 문제의 정답 제출자 찾기 (현재 활동의 submissions만 필터링)
+                        const completedSubmission = submissions.find(sub => 
+                          sub?.activityId === selectedActivity &&
+                          sub.questionId === (question.questionId || question.id) &&
+                          sub.isCorrect === true
+                        );
+                        
+                        return (
+                          <div
+                            key={question.id || questionIndex}
+                            className="border border-gray-300 rounded-lg p-4"
+                          >
+                            <div className="mb-2">
+                              <p className="font-semibold">[{questionNumber}번 문제] {question.questionText}</p>
+                              {question.imageUrl && (
+                                <div className="mt-2 mb-2">
+                                  <img
+                                    src={question.imageUrl}
+                                    alt="문제 이미지"
+                                    className="max-w-[50%] h-auto max-h-[200px] rounded-lg border border-gray-300 object-contain"
                                   />
-                                  <label
-                                    htmlFor={`image-upload-${team.id}-${question.id}`}
-                                    className={`px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm cursor-pointer inline-block ${
-                                      isUploadingQuestionImage ? 'opacity-50 cursor-not-allowed' : ''
-                                    }`}
-                                  >
-                                    {isUploadingQuestionImage ? '업로드 중...' : '이미지 수정'}
-                                  </label>
-                                  <button
-                                    onClick={() => {
-                                      if (confirm('이미지를 삭제하시겠습니까?')) {
-                                        handleUpdateQuestion(team.id, question.id, 'imageUrl', null);
-                                      }
-                                    }}
-                                    className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
-                                  >
-                                    이미지 삭제
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      if (confirm('정말 삭제하시겠습니까?')) {
-                                        handleDeleteQuestion(team.id, question.id);
-                                      }
-                                    }}
-                                    className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
-                                  >
-                                    삭제
-                                  </button>
                                 </div>
-                                <div className="bg-gray-50 p-4 rounded flex flex-col items-center">
-                                  {/* QR 코드 라벨 정보 */}
-                                  <div className="text-center mb-2 w-full">
-                                    <p className="font-semibold text-sm text-gray-800 mb-1">{activityName}</p>
-                                    <p className="font-medium text-sm text-gray-700 mb-1">{team.name}</p>
-                                    <p className="font-bold text-base text-gray-900">{questionNumber}번 문제</p>
-                                  </div>
-                                  {/* QR 코드 */}
-                                  <QRCodeSVG value={qrUrl} size={128} className="mx-auto" />
-                                  <p className="text-xs text-gray-500 mt-2 break-all text-center">{qrUrl}</p>
-                                </div>
+                              )}
+                              <p className="text-sm text-gray-600">정답: {question.answer}</p>
+                              <p className="text-sm text-blue-600">배점: {question.score}점</p>
+                              {question.completed && completedSubmission && (
+                                <p className="text-sm text-green-600 mt-1 font-semibold">
+                                  ✅ 제출 완료, 제출자: {completedSubmission.studentName || '알 수 없음'}
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex gap-2 mb-4 flex-wrap">
+                              <button
+                                onClick={() => {
+                                  const newText = prompt('문제 내용 수정:', question.questionText);
+                                  if (newText) {
+                                    handleUpdateQuestion(question.id, 'questionText', newText);
+                                  }
+                                }}
+                                className="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm"
+                              >
+                                내용 수정
+                              </button>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => {
+                                  const file = e.target.files[0];
+                                  if (file) {
+                                    handleUpdateQuestionImage(question.id, file);
+                                  }
+                                  // input 초기화
+                                  e.target.value = '';
+                                }}
+                                className="hidden"
+                                id={`image-upload-${question.id}`}
+                                disabled={isUploadingQuestionImage}
+                              />
+                              <label
+                                htmlFor={`image-upload-${question.id}`}
+                                className={`px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm cursor-pointer inline-block ${
+                                  isUploadingQuestionImage ? 'opacity-50 cursor-not-allowed' : ''
+                                }`}
+                              >
+                                {isUploadingQuestionImage ? '업로드 중...' : '이미지 수정'}
+                              </label>
+                              <button
+                                onClick={() => {
+                                  if (confirm('이미지를 삭제하시겠습니까?')) {
+                                    handleUpdateQuestion(question.id, 'imageUrl', null);
+                                  }
+                                }}
+                                className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
+                              >
+                                이미지 삭제
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (confirm('정말 삭제하시겠습니까?')) {
+                                    handleDeleteQuestion(question.id);
+                                  }
+                                }}
+                                className="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                            <div className="bg-gray-50 p-4 rounded flex flex-col items-center">
+                              {/* QR 코드 라벨 정보 */}
+                              <div className="text-center mb-2 w-full">
+                                <p className="font-semibold text-sm text-gray-800 mb-1">{activityName}</p>
+                                <p className="font-bold text-base text-gray-900">{questionNumber}번 문제</p>
                               </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                              {/* QR 코드 */}
+                              <QRCodeSVG value={qrUrl} size={128} className="mx-auto" />
+                              <p className="text-xs text-gray-500 mt-2 break-all text-center">{qrUrl}</p>
+                            </div>
+                          </div>
+                        );
+                      }).filter(Boolean)} {/* null 값 제거 */}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
             {activeTab === 'monitoring' && (
               <div className="space-y-6">
+                {/* 퇴출된 학생 명단 */}
+                <div className="bg-white rounded-lg shadow-md p-6">
+                  <h2 className="text-2xl font-semibold text-gray-700 mb-4">현재 퇴출된 인원</h2>
+                  {(() => {
+                    // 현재 활동의 퇴출자 목록
+                    const currentEliminated = eliminatedList.filter(item => item.activityId === selectedActivity);
+                    
+                    if (currentEliminated.length === 0) {
+                      return <p className="text-gray-500 text-center py-4">없음</p>;
+                    }
+                    
+                    return (
+                      <div className="space-y-2">
+                        {currentEliminated
+                          .sort((a, b) => {
+                            const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : 0;
+                            const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : 0;
+                            return timeB - timeA;
+                          })
+                          .map((item, index) => (
+                            <div key={item.id || index} className="p-3 bg-red-50 border-l-4 border-red-600 rounded">
+                              <p className="font-medium text-red-900">{item.name}</p>
+                              {item.timestamp?.toDate && (
+                                <p className="text-xs text-gray-500 mt-1">
+                                  {item.timestamp.toDate().toLocaleString('ko-KR')}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
                 {/* 보안 경보 기준 점수 설정 */}
                 <div className="bg-white rounded-lg shadow-md p-6">
                   <h2 className="text-2xl font-semibold text-gray-700 mb-4">보안 경보 시스템 설정</h2>
@@ -2248,14 +2367,12 @@ export default function AdminDashboard() {
                         return <p className="text-gray-500 text-center py-8">아직 제출된 답변이 없습니다.</p>;
                       }
 
-                      // 모든 문제 정보 수집
-                      const allQuestions = teams.flatMap(team => 
-                        (questions[team.id] || []).map(q => ({
-                          ...q,
-                          teamName: team.name,
-                          teamId: team.id
-                        }))
-                      );
+                      // 모든 문제 정보 수집 (questions는 이제 Activity 단위 공통 문제 배열)
+                      const allQuestions = Array.isArray(questions) ? questions.map(q => ({
+                        ...q,
+                        teamName: '', // 공통 문제이므로 팀 이름 없음
+                        teamId: '' // 공통 문제이므로 팀 ID 없음
+                      })) : [];
 
                       // 문제별 통계 계산
                       const questionStats = allQuestions.map(question => {
@@ -2413,15 +2530,10 @@ export default function AdminDashboard() {
                   return (
                     <div className="space-y-4">
                       {filteredSubmissions.map((submission) => {
-                        // 문제 정보 찾기 (정답 정보를 위해)
-                        const questionInfo = teams.flatMap(team => 
-                          (questions[team.id] || []).map(q => ({
-                            ...q,
-                            teamName: team.name
-                          }))
-                        ).find(q => 
+                        // 문제 정보 찾기 (정답 정보를 위해) - questions는 이제 Activity 단위 공통 문제 배열
+                        const questionInfo = Array.isArray(questions) ? questions.find(q => 
                           (q.questionId || q.id) === submission?.questionId
-                        );
+                        ) : null;
                         
                         return (
                           <div

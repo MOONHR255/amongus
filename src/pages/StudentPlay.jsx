@@ -14,7 +14,8 @@ import {
   query,
   where,
   orderBy,
-  limit
+  limit,
+  writeBatch
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { checkAnswer } from '../utils/answerChecker';
@@ -24,7 +25,7 @@ import imageCompression from 'browser-image-compression';
 // OpenAI 클라이언트는 함수 내에서 동적으로 생성
 
 export default function StudentPlay() {
-  const { activityId, teamId, questionId } = useParams();
+  const { activityId, questionId } = useParams(); // teamId 제거
   const [question, setQuestion] = useState(null);
   const [team, setTeam] = useState(null);
   const [userAnswer, setUserAnswer] = useState('');
@@ -36,6 +37,7 @@ export default function StudentPlay() {
   const [currentScore, setCurrentScore] = useState(0);
   const [showJokerModal, setShowJokerModal] = useState(false);
   const [jokerStudentName, setJokerStudentName] = useState('');
+  const [citizenTeamName, setCitizenTeamName] = useState('시민 팀'); // 시민팀 이름 저장
 
   // 새로 추가된 상태
   const [studentName, setStudentName] = useState('');
@@ -54,11 +56,12 @@ export default function StudentPlay() {
   const [isAccessCodeVerified, setIsAccessCodeVerified] = useState(false); // 고유번호 검증 완료 여부
   const [verifiedTeamId, setVerifiedTeamId] = useState(null); // 검증된 팀 ID
   const [verifiedTeamName, setVerifiedTeamName] = useState(''); // 검증된 팀 이름
+  const [verifiedTeamType, setVerifiedTeamType] = useState(null); // 검증된 팀 타입 (citizen/joker) - 역할
   const [accessCodeError, setAccessCodeError] = useState(''); // 고유번호 오류 메시지
 
   // 학생 이름은 localStorage에 저장하지 않음 (매번 빈 칸으로 시작)
 
-  // 문제 및 팀 정보 로드 (고유번호 검증 후에만 실행)
+  // 문제 정보 로드 (고유번호 검증 후에만 실행, Activity 단위 공통 문제)
   useEffect(() => {
     // 필수 파라미터 확인
     if (!activityId || !questionId) {
@@ -66,28 +69,32 @@ export default function StudentPlay() {
     }
 
     // 고유번호가 검증되지 않았으면 문제를 로드하지 않음
-    if (!isAccessCodeVerified || !verifiedTeamId) {
+    if (!isAccessCodeVerified) {
       return;
     }
 
     const loadData = async () => {
       try {
-        // 검증된 팀 ID를 사용하여 팀 정보 로드
-        const activityRef = doc(db, 'activities', activityId);
-        const teamRef = doc(activityRef, 'teams', verifiedTeamId);
-        const teamSnap = await getDoc(teamRef);
-        
-        if (!teamSnap.exists()) {
-          alert('팀 정보를 찾을 수 없습니다.');
+        // db 유효성 검사
+        if (!db) {
+          console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+          alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
           return;
         }
-
-        const teamData = { id: teamSnap.id, ...teamSnap.data() };
-        setTeam(teamData);
-        setCurrentScore(teamData.score || 0);
-
-        // 문제 정보 로드 (검증된 팀 ID 사용)
-        const questionsSnapshot = await getDocs(collection(teamRef, 'questions'));
+        
+        if (!activityId) {
+          console.error('activityId가 없습니다.');
+          return;
+        }
+        
+        // Activity 단위 공통 문제 로드
+        const activityRef = doc(db, 'activities', activityId);
+        if (!activityRef) {
+          console.error('activityRef를 생성할 수 없습니다.');
+          return;
+        }
+        
+        const questionsSnapshot = await getDocs(collection(activityRef, 'questions'));
         const foundQuestion = questionsSnapshot.docs.find(
           (qDoc) => qDoc.data().questionId === questionId || qDoc.id === questionId
         );
@@ -112,7 +119,7 @@ export default function StudentPlay() {
           const submissionsQuery = query(
             collection(db, 'submissions'),
             where('activityId', '==', activityId),
-            where('teamId', '==', verifiedTeamId),
+            where('accessCode', '==', accessCode), // 고유번호로 검색
             where('questionId', '==', questionId),
             orderBy('submittedAt', 'desc'),
             limit(1)
@@ -157,7 +164,7 @@ export default function StudentPlay() {
     };
 
     loadData();
-  }, [activityId, questionId, isAccessCodeVerified, verifiedTeamId]);
+  }, [activityId, questionId, isAccessCodeVerified, accessCode]);
 
   // 고유번호 검증 함수 (재사용 가능)
   const verifyAccessCode = async (code) => {
@@ -174,7 +181,24 @@ export default function StudentPlay() {
     try {
       setAccessCodeError(''); // 에러 메시지 초기화
       
+      // db 유효성 검사
+      if (!db) {
+        console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+        alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
+        return false;
+      }
+      
+      if (!activityId) {
+        setAccessCodeError('활동 정보를 찾을 수 없습니다.');
+        return false;
+      }
+      
       const activityRef = doc(db, 'activities', activityId);
+      if (!activityRef) {
+        console.error('activityRef를 생성할 수 없습니다.');
+        setAccessCodeError('활동 정보를 찾을 수 없습니다.');
+        return false;
+      }
       
       // 모든 팀의 access_codes 검색 (is_used 체크 제거 - 재사용 가능)
       const teamsSnapshot = await getDocs(collection(activityRef, 'teams'));
@@ -189,16 +213,16 @@ export default function StudentPlay() {
         );
         
         if (!accessCodesSnapshot.empty) {
-          // 고유번호를 찾았음 (재사용 가능하므로 is_used 체크 없음)
+          // 고유번호를 찾았음
           const teamData = teamDoc.data();
           
-          // 검증된 팀 정보 저장
+          // 검증된 팀 정보 저장 (역할 정보 포함)
           setVerifiedTeamId(teamDoc.id);
           setVerifiedTeamName(teamData.name);
+          setVerifiedTeamType(teamData.type || 'citizen'); // 시민 또는 조커
           setIsAccessCodeVerified(true);
           setAccessCodeError('');
           
-          // 팀 정보는 useEffect에서 로드되므로 여기서는 상태만 설정
           // 문제 로드는 useEffect에서 자동으로 처리됨
           
           return true;
@@ -206,7 +230,8 @@ export default function StudentPlay() {
       }
       
       // 고유번호를 찾지 못함
-      setAccessCodeError('유효하지 않은 고유번호입니다.');
+      alert("해당 고유번호는 존재하지 않습니다. 다시 입력하세요.");
+      setAccessCodeError('해당 고유번호는 존재하지 않습니다. 다시 입력하세요.');
       return false;
     } catch (error) {
       console.error('고유번호 검증 오류:', error);
@@ -310,19 +335,12 @@ export default function StudentPlay() {
   // 정답 제출
   const handleSubmit = async () => {
     // 1. 고유번호 검증 확인
-    if (!isAccessCodeVerified || !verifiedTeamId) {
+    if (!isAccessCodeVerified || !verifiedTeamId || !verifiedTeamType) {
       alert('고유번호를 먼저 입력해주세요.');
       return;
     }
     
-    // 2. 팀 검증 (정답 제출 시 엄격한 검증)
-    if (verifiedTeamId !== teamId) {
-      const teamName = team?.name || '알 수 없는 팀';
-      alert(`${teamName}이 아니므로 정답을 제출할 수 없습니다.`);
-      return;
-    }
-    
-    // 3. 퇴출된 학생인지 확인
+    // 2. 퇴출된 학생인지 확인
     if (!studentName || !studentName.trim()) {
       alert('학생 이름을 입력해주세요.');
       return;
@@ -331,12 +349,17 @@ export default function StudentPlay() {
     // 퇴출 확인은 반드시 이름 입력 후 실행
     const isEliminated = await checkEliminated(studentName.trim());
     if (isEliminated) {
-      alert("이미 퇴출된 플레이어입니다. 답안을 제출할 수 없습니다.");
-      return; // 즉시 함수 종료 - 절대 뒤쪽 로직 실행 안 됨
+      // 문제 배점 확인: 1점짜리 문제만 허용
+      const questionScore = question?.score || 0;
+      if (questionScore !== 1) {
+        alert("이미 퇴출된 플레이어입니다. 1점짜리 문제만 풀 수 있습니다.");
+        return; // 즉시 함수 종료 - 절대 뒤쪽 로직 실행 안 됨
+      }
+      // 1점짜리 문제는 허용 (아래 로직 계속 진행)
     }
 
     // 제출 중이거나, 이미 완료되었거나, 답안이 비어있거나, 마지막 제출한 답안과 같으면 제출 불가
-    if (!question || !team || statusMessage || isCompleted || !userAnswer.trim() || uploading) {
+    if (!question || statusMessage || isCompleted || !userAnswer.trim() || uploading) {
       return;
     }
 
@@ -361,8 +384,30 @@ export default function StudentPlay() {
     });
 
     try {
+      // db 유효성 검사
+      if (!db) {
+        console.error('db가 정의되지 않았습니다. firebase.js를 확인하세요.');
+        alert('데이터베이스 연결 오류가 발생했습니다. 페이지를 새로고침해주세요.');
+        setStatusMessage('');
+        setUploading(false);
+        return;
+      }
+      
+      if (!activityId) {
+        console.error('activityId가 없습니다.');
+        setStatusMessage('');
+        setUploading(false);
+        return;
+      }
+      
       const activityRef = doc(db, 'activities', activityId);
-      const teamRef = doc(activityRef, 'teams', verifiedTeamId); // 검증된 팀 ID 사용
+      if (!activityRef) {
+        console.error('activityRef를 생성할 수 없습니다.');
+        alert('활동 정보를 찾을 수 없습니다.');
+        setStatusMessage('');
+        setUploading(false);
+        return;
+      }
 
       // (3) 이미지 업로드 (핵심)
       if (selectedImage) {
@@ -390,51 +435,128 @@ export default function StudentPlay() {
       }
 
       if (isCorrect) {
-        // 정답인 경우
-        const questionRef = doc(teamRef, 'questions', question.id);
-        
-        // 점수 업데이트 및 문제 완료 표시
-        await updateDoc(teamRef, {
-          score: increment(question.score)
-        });
-        
-        // 문제 문서에 완료 표시
-        await updateDoc(questionRef, {
-          completed: true,
-          completedAt: new Date()
-        });
-        
-        setCurrentScore((prev) => prev + question.score);
-        setResult({ type: 'success', message: `미션 완료! +${question.score}점!` });
-        setIsSubmitted(true);
-        setIsCompleted(true);
-        setLastSubmittedAnswer(userAnswer.trim());
-        // 제출 후 이름은 빈 칸으로 초기화
-        setStudentName('');
+        // 정답인 경우 - 역할에 따라 해당 역할의 모든 팀 점수 증가 (공동 문제 시스템)
+        try {
+          // 모든 팀 목록 가져오기
+          const teamsSnapshot = await getDocs(collection(activityRef, 'teams'));
+          
+          // db 유효성 검사
+          if (!db) {
+            throw new Error('db가 정의되지 않았습니다.');
+          }
+          
+          const batch = writeBatch(db);
+          let updateCount = 0;
+          const teamNames = []; // 팀 이름 저장용
+          
+          // 해당 역할(citizen/joker)의 모든 팀 점수 증가
+          teamsSnapshot.docs.forEach(teamDoc => {
+            const teamData = teamDoc.data();
+            if (teamData.type === verifiedTeamType) {
+              const teamRef = doc(activityRef, 'teams', teamDoc.id);
+              batch.update(teamRef, {
+                score: increment(question.score || 0)
+              });
+              updateCount++;
+              teamNames.push(teamData.name || '알 수 없음'); // 팀 이름 저장
+            }
+          });
+          
+          // 업데이트할 팀이 있는 경우에만 commit
+          if (updateCount > 0) {
+            await batch.commit();
+            console.log(`${updateCount}개의 ${verifiedTeamType} 팀 점수가 업데이트되었습니다.`);
+          } else {
+            console.warn('업데이트할 팀이 없습니다.');
+          }
+          
+          // 결과 메시지 - 실제 팀 이름 사용
+          const teamNamesStr = teamNames.length > 0 ? teamNames.join(', ') : (verifiedTeamType === 'citizen' ? '시민' : '조커');
+          setResult({ type: 'success', message: `미션 완료! ${teamNamesStr} 팀에 +${question.score || 0}점!` });
+          setIsSubmitted(true);
+          setIsCompleted(true);
+          setLastSubmittedAnswer(userAnswer.trim());
+          // 제출 후 이름은 빈 칸으로 초기화
+          setStudentName('');
 
-        // 조커 로직
-        if (team.type === 'joker') {
-          setShowJokerModal(true);
+          // 조커 로직
+          if (verifiedTeamType === 'joker') {
+            // 시민팀 이름 가져오기
+            try {
+              const teamsSnapshot = await getDocs(collection(activityRef, 'teams'));
+              const citizenTeam = teamsSnapshot.docs.find(doc => doc.data().type === 'citizen');
+              if (citizenTeam) {
+                setCitizenTeamName(citizenTeam.data().name || '시민 팀');
+              }
+            } catch (error) {
+              console.error('시민팀 이름 로드 오류:', error);
+            }
+            setShowJokerModal(true);
+          }
+        } catch (scoreUpdateError) {
+          console.error('점수 업데이트 오류:', scoreUpdateError);
+          alert('점수 업데이트 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.');
+          setStatusMessage('');
+          setUploading(false);
+          return;
         }
       } else {
-        // 오답인 경우
-        await updateDoc(teamRef, {
-          score: increment(-3)
-        });
-        
-        setCurrentScore((prev) => prev - 3);
-        setResult({ type: 'error', message: '틀렸습니다. -3점' });
-        setLastSubmittedAnswer(userAnswer.trim()); // 마지막 제출 답안 저장
-        
-        // 제출 직후 풀이를 보여주기 위해 이미지 URL 저장
-        if (imageUrl) {
-          setSavedImageUrl(imageUrl);
+        // 오답인 경우 - 해당 역할의 모든 팀 점수 감소 (공동 문제 시스템)
+        try {
+          // 모든 팀 목록 가져오기
+          const teamsSnapshot = await getDocs(collection(activityRef, 'teams'));
+          
+          // db 유효성 검사
+          if (!db) {
+            throw new Error('db가 정의되지 않았습니다.');
+          }
+          
+          const batch = writeBatch(db);
+          let updateCount = 0;
+          const teamNames = []; // 팀 이름 저장용
+          
+          // 해당 역할(citizen/joker)의 모든 팀 점수 감소
+          teamsSnapshot.docs.forEach(teamDoc => {
+            const teamData = teamDoc.data();
+            if (teamData.type === verifiedTeamType) {
+              const teamRef = doc(activityRef, 'teams', teamDoc.id);
+              batch.update(teamRef, {
+                score: increment(-3)
+              });
+              updateCount++;
+              teamNames.push(teamData.name || '알 수 없음'); // 팀 이름 저장
+            }
+          });
+          
+          // 업데이트할 팀이 있는 경우에만 commit
+          if (updateCount > 0) {
+            await batch.commit();
+            console.log(`${updateCount}개의 ${verifiedTeamType} 팀 점수가 감소되었습니다.`);
+          } else {
+            console.warn('업데이트할 팀이 없습니다.');
+          }
+          
+          // 결과 메시지 - 실제 팀 이름 사용
+          const teamNamesStr = teamNames.length > 0 ? teamNames.join(', ') : (verifiedTeamType === 'citizen' ? '시민' : '조커');
+          setResult({ type: 'error', message: `틀렸습니다. ${teamNamesStr} 팀에 -3점` });
+          setLastSubmittedAnswer(userAnswer.trim()); // 마지막 제출 답안 저장
+          
+          // 제출 직후 풀이를 보여주기 위해 이미지 URL 저장
+          if (imageUrl) {
+            setSavedImageUrl(imageUrl);
+          }
+          
+          // 제출 직후 화면 표시를 위해 isSubmitted를 true로 설정 (재시도는 나중에 가능)
+          setIsSubmitted(true);
+          // 제출 후 이름은 빈 칸으로 초기화
+          setStudentName('');
+        } catch (scoreUpdateError) {
+          console.error('점수 업데이트 오류:', scoreUpdateError);
+          alert('점수 업데이트 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.');
+          setStatusMessage('');
+          setUploading(false);
+          return;
         }
-        
-        // 제출 직후 화면 표시를 위해 isSubmitted를 true로 설정 (재시도는 나중에 가능)
-        setIsSubmitted(true);
-        // 제출 후 이름은 빈 칸으로 초기화
-        setStudentName('');
       }
 
       // 서술형 풀이가 있으면 AI 피드백 생성 (정답/오답 모두 허용)
@@ -554,10 +676,14 @@ export default function StudentPlay() {
             setSavedImageUrl(imageUrl);
           }
 
-          // submissions 컬렉션에 저장 (teamName 포함, verifiedTeamId 사용)
+          // submissions 컬렉션에 저장 (accessCode, teamType 포함)
           await addDoc(collection(db, 'submissions'), {
             studentName: studentName.trim(),
-            teamName: team.name || '알 수 없음',
+            accessCode: accessCode, // 고유번호 저장
+            teamType: verifiedTeamType, // 역할 저장
+            teamName: verifiedTeamName || '알 수 없음',
+            accessCode: accessCode,
+            teamType: verifiedTeamType,
             activityId: activityId,
             teamId: verifiedTeamId, // 검증된 팀 ID 사용
             questionId: questionId,
@@ -588,7 +714,9 @@ export default function StudentPlay() {
           try {
             await addDoc(collection(db, 'submissions'), {
               studentName: studentName.trim(),
-              teamName: team.name || '알 수 없음',
+              teamName: verifiedTeamName || '알 수 없음',
+            accessCode: accessCode,
+            teamType: verifiedTeamType,
               activityId: activityId,
               teamId: verifiedTeamId, // 검증된 팀 ID 사용
               questionId: questionId,
@@ -615,7 +743,9 @@ export default function StudentPlay() {
         try {
           await addDoc(collection(db, 'submissions'), {
             studentName: studentName.trim(),
-            teamName: team.name || '알 수 없음',
+            teamName: verifiedTeamName || '알 수 없음',
+            accessCode: accessCode,
+            teamType: verifiedTeamType,
             activityId: activityId,
             teamId: verifiedTeamId, // 검증된 팀 ID 사용
             questionId: questionId,
@@ -765,8 +895,8 @@ export default function StudentPlay() {
     );
   }
 
-  // 문제와 팀 정보가 로드되지 않았으면 로딩 화면 표시
-  if (!question || !team) {
+  // 문제가 로드되지 않았으면 로딩 화면 표시
+  if (!question) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
         <div className="text-white text-xl">로딩 중...</div>
@@ -1037,7 +1167,7 @@ export default function StudentPlay() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-2xl p-8 max-w-md w-full mx-4">
             <h3 className="text-2xl font-bold text-gray-800 mb-4">
-              퇴출시킬 시민 팀 구성원의 이름은?
+              퇴출시킬 {citizenTeamName} 구성원의 이름은?
             </h3>
             <input
               type="text"
